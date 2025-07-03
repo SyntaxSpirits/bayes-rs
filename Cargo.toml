@@ -1,0 +1,30 @@
+[package]
+name = "bayes-rs"
+version = "0.1.0"
+edition = "2021"
+authors = ["Alex Kholodniak <alexandrkholodniak@gmail.com>"]
+description = "A Rust library for Bayesian inference with MCMC samplers"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/SyntaxSpirits/bayes-rs"
+documentation = "https://docs.rs/bayes-rs"
+keywords = ["bayesian", "mcmc", "statistics", "inference", "sampling"]
+categories = ["science", "mathematics"]
+
+[dependencies]
+rand = "0.8"
+rand_distr = "0.4"
+nalgebra = "0.32"
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"], optional = true }
+
+[dev-dependencies]
+approx = "0.5"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[features]
+default = []
+serde = ["dep:serde", "nalgebra/serde-serialize"]
+
+[[bench]]
+name = "mcmc_benchmarks"
+harness = false

@@ -1,0 +1,52 @@
+# Rust build artifacts
+/target/
+Cargo.lock
+
+# Generated documentation
+/doc/
+
+# Backup files
+**/*.rs.bk
+**/*.bk
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS-specific files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Generated output files
+*.csv
+*.log
+*.out
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Flamegraph files
+flamegraph.svg
+perf.data*
+
+# Coverage files
+*.profraw
+*.profdata
+tarpaulin-report.html
+cobertura.xml
+
+# Benchmark results
+criterion/
+
+# RustRover
+.fleet/ 
