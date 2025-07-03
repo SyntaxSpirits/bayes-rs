@@ -64,15 +64,12 @@ fn generate_hierarchical_data() -> Vec<Vec<f64>> {
     let population_dist = RandNormal::new(true_population_mean, true_population_std).unwrap();
     let group_means: Vec<f64> = (0..3).map(|_| population_dist.sample(&mut rng)).collect();
 
-    println!(
-        "True population mean: {:.2}, std: {:.2}",
-        true_population_mean, true_population_std
-    );
+    println!("True population mean: {true_population_mean:.2}, std: {true_population_std:.2}");
     println!(
         "True group means: {:?}",
         group_means
             .iter()
-            .map(|x| format!("{:.2}", x))
+            .map(|x| format!("{x:.2}"))
             .collect::<Vec<_>>()
     );
 
