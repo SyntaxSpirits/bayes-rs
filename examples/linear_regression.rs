@@ -211,7 +211,7 @@ fn bayesian_linear_regression_hmc(x: &[f64], y: &[f64]) -> Result<Vec<DVector<f6
 fn print_diagnostics(samples: &[DVector<f64>], method_name: &str) {
     let diagnostics = McmcDiagnostics::from_single_chain(samples).unwrap();
 
-    println!("\n=== {} Results ===", method_name);
+    println!("\n=== {method_name} Results ===");
     println!("Parameter estimates (posterior means):");
     println!(
         "  Intercept (β₀): {:.3} ± {:.3}",
@@ -261,7 +261,7 @@ fn save_samples_csv(samples: &[DVector<f64>], filename: &str) -> std::io::Result
         writeln!(file, "{},{},{},{}", i, sample[0], sample[1], sample[2])?;
     }
 
-    println!("Samples saved to {}", filename);
+    println!("Samples saved to {filename}");
     Ok(())
 }
 
@@ -309,11 +309,8 @@ fn main() -> Result<()> {
 
     let (x_data, y_data) = generate_data(n_data, true_slope, true_intercept, noise_std);
 
-    println!("Generated {} data points", n_data);
-    println!(
-        "True parameters: intercept = {}, slope = {}, noise_std = {}",
-        true_intercept, true_slope, noise_std
-    );
+    println!("Generated {n_data} data points");
+    println!("True parameters: intercept = {true_intercept}, slope = {true_slope}, noise_std = {noise_std}");
 
     // Perform Bayesian inference with Metropolis-Hastings
     println!("\nRunning Metropolis-Hastings sampler...");
@@ -327,9 +324,9 @@ fn main() -> Result<()> {
 
     // Save samples to files
     save_samples_csv(&mh_samples, "mh_samples.csv")
-        .map_err(|e| BayesError::invalid_configuration(format!("IO error: {}", e)))?;
+        .map_err(|e| BayesError::invalid_configuration(format!("IO error: {e}")))?;
     save_samples_csv(&hmc_samples, "hmc_samples.csv")
-        .map_err(|e| BayesError::invalid_configuration(format!("IO error: {}", e)))?;
+        .map_err(|e| BayesError::invalid_configuration(format!("IO error: {e}")))?;
 
     // Generate predictions
     let x_pred: Vec<f64> = (0..21).map(|i| i as f64 * 0.5).collect();
