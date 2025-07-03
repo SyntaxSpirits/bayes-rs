@@ -4,7 +4,7 @@ A comprehensive Rust library for Bayesian inference with MCMC samplers, featurin
 
 [![Crates.io](https://img.shields.io/crates/v/bayes-rs.svg)](https://crates.io/crates/bayes-rs)
 [![Documentation](https://docs.rs/bayes-rs/badge.svg)](https://docs.rs/bayes-rs)
-[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ## Features
 
@@ -330,12 +330,7 @@ cargo doc --open
 
 ## License
 
-This project is licensed under either of
-
-- Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
-
-at your option.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## Citation
 
