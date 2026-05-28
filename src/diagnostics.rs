@@ -116,6 +116,8 @@ impl McmcDiagnostics {
 
             let ess = calculate_multi_chain_ess(&param_chains);
             let pooled_variance = calculate_variance(&pooled_samples);
+            // Use pooled variance with the summed per-chain ESS so chain boundaries do not
+            // influence autocorrelation while between-chain variance still raises MCSE.
             let mcse = if pooled_variance == 0.0 {
                 0.0
             } else {
@@ -232,6 +234,8 @@ fn calculate_mcse(samples: &[f64]) -> f64 {
     (variance / ess).sqrt()
 }
 
+/// Estimate total ESS by summing per-chain ESS values instead of concatenating chains,
+/// which would treat unrelated chain boundaries as adjacent Markov states.
 fn calculate_multi_chain_ess(chains: &[Vec<f64>]) -> f64 {
     chains.iter().map(|chain| calculate_ess(chain)).sum()
 }
@@ -482,6 +486,13 @@ mod tests {
             DVector::from_vec(vec![1.0, 2.0]),
             DVector::from_vec(vec![1.0]),
         ];
+
+        assert!(McmcDiagnostics::from_single_chain(&samples).is_err());
+    }
+
+    #[test]
+    fn test_single_chain_rejects_zero_parameters() {
+        let samples = vec![DVector::from_vec(Vec::new())];
 
         assert!(McmcDiagnostics::from_single_chain(&samples).is_err());
     }
