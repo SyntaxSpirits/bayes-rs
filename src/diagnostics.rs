@@ -100,26 +100,60 @@ impl McmcDiagnostics {
             }
         }
 
-        // Calculate pooled summary diagnostics across all chains.
-        let pooled_samples: Vec<DVector<f64>> = chains.iter().flatten().cloned().collect();
-        let mut diagnostics = Self::from_single_chain(&pooled_samples)?;
-
-        // Calculate R-hat for each parameter
+        let mut effective_sample_size = Vec::with_capacity(n_params);
+        let mut mc_se = Vec::with_capacity(n_params);
+        let mut mean = Vec::with_capacity(n_params);
+        let mut std_dev = Vec::with_capacity(n_params);
+        let mut quantiles = Vec::with_capacity(n_params);
         let mut r_hat = Vec::with_capacity(n_params);
+
         for param_idx in 0..n_params {
-            let mut param_chains = Vec::with_capacity(chains.len());
-            for chain in chains {
-                let mut param_chain = Vec::with_capacity(chain.len());
-                for sample in chain {
-                    param_chain.push(sample[param_idx]);
-                }
-                param_chains.push(param_chain);
+            let param_chains: Vec<Vec<f64>> = chains
+                .iter()
+                .map(|chain| chain.iter().map(|sample| sample[param_idx]).collect())
+                .collect();
+            let pooled_samples: Vec<f64> = param_chains.iter().flatten().copied().collect();
+
+            let ess = calculate_multi_chain_ess(&param_chains);
+            let pooled_variance = calculate_variance(&pooled_samples);
+            let mcse = if pooled_variance == 0.0 {
+                0.0
+            } else {
+                (pooled_variance / ess).sqrt()
+            };
+            let param_mean = calculate_mean(&pooled_samples);
+            let param_std_dev = calculate_std_dev(&pooled_samples);
+            let param_quantiles = calculate_quantiles(&pooled_samples);
+            let param_r_hat = calculate_r_hat(&param_chains)?;
+
+            if !ess.is_finite()
+                || !mcse.is_finite()
+                || !param_mean.is_finite()
+                || !param_std_dev.is_finite()
+                || !param_quantiles.iter().all(|value| value.is_finite())
+                || !param_r_hat.is_finite()
+            {
+                return Err(BayesError::numerical_error(
+                    "Diagnostics produced non-finite values",
+                ));
             }
-            r_hat.push(calculate_r_hat(&param_chains)?);
+
+            effective_sample_size.push(ess);
+            mc_se.push(mcse);
+            mean.push(param_mean);
+            std_dev.push(param_std_dev);
+            quantiles.push(param_quantiles);
+            r_hat.push(param_r_hat);
         }
 
-        diagnostics.r_hat = Some(r_hat);
-        Ok(diagnostics)
+        Ok(Self {
+            effective_sample_size,
+            r_hat: Some(r_hat),
+            mc_se,
+            mean,
+            std_dev,
+            quantiles,
+        })
     }
 
     /// Check if chains have converged (R-hat < 1.1)
@@ -198,6 +232,10 @@ fn calculate_mcse(samples: &[f64]) -> f64 {
     (variance / ess).sqrt()
 }
 
+fn calculate_multi_chain_ess(chains: &[Vec<f64>]) -> f64 {
+    chains.iter().map(|chain| calculate_ess(chain)).sum()
+}
+
 /// Calculate R-hat statistic (Gelman-Rubin diagnostic)
 fn calculate_r_hat(chains: &[Vec<f64>]) -> Result<f64> {
     if chains.len() < 2 {
@@ -260,7 +298,7 @@ fn calculate_r_hat(chains: &[Vec<f64>]) -> Result<f64> {
         };
     }
 
-    let r_hat = (var_plus / within_chain_var).sqrt().max(1.0);
+    let r_hat = (var_plus / within_chain_var).sqrt();
 
     Ok(r_hat)
 }
@@ -528,13 +566,35 @@ mod tests {
     }
 
     #[test]
-    fn test_r_hat_identical_chains() {
+    fn test_r_hat_identical_chains_returns_raw_value() {
         let chain1 = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let chain2 = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let chains = vec![chain1, chain2];
 
         let r_hat = calculate_r_hat(&chains).unwrap();
-        assert_abs_diff_eq!(r_hat, 1.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(r_hat, (4.0_f64 / 5.0).sqrt(), epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_multiple_chain_ess_sums_per_chain_without_boundary_correlation() {
+        let chain: Vec<DVector<f64>> = (1..=20)
+            .map(|value| DVector::from_vec(vec![value as f64]))
+            .collect();
+        let chains = vec![chain.clone(), chain];
+
+        let diagnostics = McmcDiagnostics::from_multiple_chains(&chains).unwrap();
+        let param_chains: Vec<Vec<f64>> = chains
+            .iter()
+            .map(|chain| chain.iter().map(|sample| sample[0]).collect())
+            .collect();
+        let expected_ess = calculate_ess(&param_chains[0]) + calculate_ess(&param_chains[1]);
+
+        assert_abs_diff_eq!(
+            diagnostics.effective_sample_size[0],
+            expected_ess,
+            epsilon = 1e-10
+        );
+        assert!(diagnostics.effective_sample_size[0] < 40.0);
     }
 
     #[test]
