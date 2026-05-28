@@ -23,12 +23,8 @@ pub struct McmcDiagnostics {
 impl McmcDiagnostics {
     /// Create diagnostics from a single chain
     pub fn from_single_chain(samples: &[DVector<f64>]) -> Result<Self> {
-        if samples.is_empty() {
-            return Err(BayesError::invalid_parameter("No samples provided"));
-        }
-
+        validate_samples(samples)?;
         let n_params = samples[0].len();
-        let _n_samples = samples.len();
 
         // Extract parameter samples
         let mut param_samples = vec![Vec::new(); n_params];
@@ -45,11 +41,28 @@ impl McmcDiagnostics {
         let mut quantiles = Vec::with_capacity(n_params);
 
         for param_chain in param_samples {
-            effective_sample_size.push(calculate_ess(&param_chain));
-            mc_se.push(calculate_mcse(&param_chain));
-            mean.push(calculate_mean(&param_chain));
-            std_dev.push(calculate_std_dev(&param_chain));
-            quantiles.push(calculate_quantiles(&param_chain));
+            let ess = calculate_ess(&param_chain);
+            let mcse = calculate_mcse(&param_chain);
+            let param_mean = calculate_mean(&param_chain);
+            let param_std_dev = calculate_std_dev(&param_chain);
+            let param_quantiles = calculate_quantiles(&param_chain);
+
+            if !ess.is_finite()
+                || !mcse.is_finite()
+                || !param_mean.is_finite()
+                || !param_std_dev.is_finite()
+                || !param_quantiles.iter().all(|value| value.is_finite())
+            {
+                return Err(BayesError::numerical_error(
+                    "Diagnostics produced non-finite values",
+                ));
+            }
+
+            effective_sample_size.push(ess);
+            mc_se.push(mcse);
+            mean.push(param_mean);
+            std_dev.push(param_std_dev);
+            quantiles.push(param_quantiles);
         }
 
         Ok(Self {
@@ -68,16 +81,33 @@ impl McmcDiagnostics {
             return Err(BayesError::invalid_parameter("No chains provided"));
         }
 
-        let n_params = chains[0][0].len();
-        let n_chains = chains.len();
+        for chain in chains {
+            validate_samples(chain)?;
+        }
 
-        // Calculate single chain diagnostics first
-        let mut diagnostics = Self::from_single_chain(&chains[0])?;
+        let n_params = chains[0][0].len();
+        let n_samples = chains[0].len();
+
+        for chain in chains.iter().skip(1) {
+            if chain.len() != n_samples {
+                return Err(BayesError::invalid_parameter(
+                    "All chains must have same length",
+                ));
+            }
+
+            if chain[0].len() != n_params {
+                return Err(BayesError::dimension_mismatch(n_params, chain[0].len()));
+            }
+        }
+
+        // Calculate pooled summary diagnostics across all chains.
+        let pooled_samples: Vec<DVector<f64>> = chains.iter().flatten().cloned().collect();
+        let mut diagnostics = Self::from_single_chain(&pooled_samples)?;
 
         // Calculate R-hat for each parameter
         let mut r_hat = Vec::with_capacity(n_params);
         for param_idx in 0..n_params {
-            let mut param_chains = Vec::with_capacity(n_chains);
+            let mut param_chains = Vec::with_capacity(chains.len());
             for chain in chains {
                 let mut param_chain = Vec::with_capacity(chain.len());
                 for sample in chain {
@@ -112,6 +142,33 @@ impl McmcDiagnostics {
     }
 }
 
+fn validate_samples(samples: &[DVector<f64>]) -> Result<()> {
+    if samples.is_empty() {
+        return Err(BayesError::invalid_parameter("No samples provided"));
+    }
+
+    let n_params = samples[0].len();
+    if n_params == 0 {
+        return Err(BayesError::invalid_parameter(
+            "Samples must contain at least one parameter",
+        ));
+    }
+
+    for sample in samples {
+        if sample.len() != n_params {
+            return Err(BayesError::dimension_mismatch(n_params, sample.len()));
+        }
+
+        if !sample.iter().all(|value| value.is_finite()) {
+            return Err(BayesError::invalid_parameter(
+                "Samples must contain only finite values",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// Calculate effective sample size using autocorrelation
 fn calculate_ess(samples: &[f64]) -> f64 {
     let n = samples.len() as f64;
@@ -131,8 +188,11 @@ fn calculate_ess(samples: &[f64]) -> f64 {
 
 /// Calculate Monte Carlo standard error
 fn calculate_mcse(samples: &[f64]) -> f64 {
-    let _n = samples.len() as f64;
     let variance = calculate_variance(samples);
+    if variance == 0.0 {
+        return 0.0;
+    }
+
     let ess = calculate_ess(samples);
 
     (variance / ess).sqrt()
@@ -147,7 +207,16 @@ fn calculate_r_hat(chains: &[Vec<f64>]) -> Result<f64> {
     }
 
     let m = chains.len() as f64; // number of chains
+    if chains.iter().any(Vec::is_empty) {
+        return Err(BayesError::invalid_parameter("Chains must not be empty"));
+    }
+
     let n = chains[0].len() as f64; // samples per chain
+    if n < 2.0 {
+        return Err(BayesError::invalid_parameter(
+            "Need at least 2 samples per chain for R-hat",
+        ));
+    }
 
     // Check all chains have same length
     if chains.iter().any(|chain| chain.len() != n as usize) {
@@ -181,7 +250,17 @@ fn calculate_r_hat(chains: &[Vec<f64>]) -> Result<f64> {
 
     // Calculate R-hat
     let var_plus = ((n - 1.0) / n) * within_chain_var + (1.0 / n) * between_chain_var;
-    let r_hat = (var_plus / within_chain_var).sqrt();
+    if within_chain_var == 0.0 {
+        return if between_chain_var == 0.0 {
+            Ok(1.0)
+        } else {
+            Err(BayesError::numerical_error(
+                "R-hat is undefined for constant chains with different means",
+            ))
+        };
+    }
+
+    let r_hat = (var_plus / within_chain_var).sqrt().max(1.0);
 
     Ok(r_hat)
 }
@@ -191,6 +270,9 @@ fn calculate_autocorrelation(samples: &[f64]) -> Vec<f64> {
     let n = samples.len();
     let mean = calculate_mean(samples);
     let variance = calculate_variance(samples);
+    if variance == 0.0 {
+        return vec![0.0];
+    }
 
     let max_lag = (n / 4).min(100); // Limit autocorrelation calculation
     let mut autocorr = Vec::with_capacity(max_lag);
@@ -238,11 +320,19 @@ fn calculate_integrated_autocorr_time(autocorr: &[f64]) -> f64 {
 
 /// Calculate mean of a sample
 fn calculate_mean(samples: &[f64]) -> f64 {
-    samples.iter().sum::<f64>() / samples.len() as f64
+    let mut mean = 0.0;
+    for (idx, &sample) in samples.iter().enumerate() {
+        mean += (sample - mean) / (idx + 1) as f64;
+    }
+    mean
 }
 
 /// Calculate variance of a sample
 fn calculate_variance(samples: &[f64]) -> f64 {
+    if samples.len() < 2 {
+        return 0.0;
+    }
+
     let mean = calculate_mean(samples);
     let sum_sq_diff = samples.iter().map(|&x| (x - mean).powi(2)).sum::<f64>();
     sum_sq_diff / (samples.len() - 1) as f64
@@ -287,9 +377,7 @@ pub struct TracePlot {
 impl TracePlot {
     /// Create trace plot data for a parameter
     pub fn new(samples: &[DVector<f64>], parameter_index: usize) -> Result<Self> {
-        if samples.is_empty() {
-            return Err(BayesError::invalid_parameter("No samples provided"));
-        }
+        validate_samples(samples)?;
 
         if parameter_index >= samples[0].len() {
             return Err(BayesError::invalid_parameter(
@@ -351,15 +439,112 @@ mod tests {
     }
 
     #[test]
+    fn test_single_chain_rejects_inconsistent_dimensions() {
+        let samples = vec![
+            DVector::from_vec(vec![1.0, 2.0]),
+            DVector::from_vec(vec![1.0]),
+        ];
+
+        assert!(McmcDiagnostics::from_single_chain(&samples).is_err());
+    }
+
+    #[test]
+    fn test_single_sample_chain_diagnostics_are_finite() {
+        let samples = vec![DVector::from_vec(vec![2.0])];
+
+        let diagnostics = McmcDiagnostics::from_single_chain(&samples).unwrap();
+
+        assert_abs_diff_eq!(diagnostics.std_dev[0], 0.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(diagnostics.mc_se[0], 0.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(diagnostics.effective_sample_size[0], 1.0, epsilon = 1e-10);
+        assert!(diagnostics.mean[0].is_finite());
+    }
+
+    #[test]
+    fn test_multiple_chains_rejects_single_sample_chains() {
+        let chains = vec![
+            vec![DVector::from_vec(vec![1.0])],
+            vec![DVector::from_vec(vec![1.0])],
+        ];
+
+        assert!(McmcDiagnostics::from_multiple_chains(&chains).is_err());
+    }
+
+    #[test]
+    fn test_multiple_chains_rejects_empty_chains() {
+        let chains = vec![vec![DVector::from_vec(vec![1.0])], Vec::new()];
+
+        assert!(McmcDiagnostics::from_multiple_chains(&chains).is_err());
+    }
+
+    #[test]
+    fn test_multiple_chains_rejects_inconsistent_dimensions() {
+        let chains = vec![
+            vec![DVector::from_vec(vec![1.0, 2.0])],
+            vec![DVector::from_vec(vec![1.0])],
+        ];
+
+        assert!(McmcDiagnostics::from_multiple_chains(&chains).is_err());
+    }
+
+    #[test]
+    fn test_constant_chain_diagnostics_are_finite() {
+        let samples = vec![DVector::from_vec(vec![2.0]); 20];
+
+        let diagnostics = McmcDiagnostics::from_single_chain(&samples).unwrap();
+
+        assert_abs_diff_eq!(diagnostics.std_dev[0], 0.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(diagnostics.mc_se[0], 0.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(diagnostics.effective_sample_size[0], 20.0, epsilon = 1e-10);
+        assert!(diagnostics.mean[0].is_finite());
+    }
+
+    #[test]
+    fn test_constant_chains_with_different_means_reject_r_hat() {
+        let chains = vec![vec![1.0, 1.0], vec![2.0, 2.0]];
+
+        assert!(calculate_r_hat(&chains).is_err());
+    }
+
+    #[test]
+    fn test_large_constant_chain_diagnostics_are_finite() {
+        let samples = vec![DVector::from_vec(vec![1.0e308]); 4];
+
+        let diagnostics = McmcDiagnostics::from_single_chain(&samples).unwrap();
+
+        assert!(diagnostics.mean[0].is_finite());
+        assert_abs_diff_eq!(diagnostics.std_dev[0], 0.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(diagnostics.mc_se[0], 0.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_overflowing_diagnostics_return_error() {
+        let samples = vec![
+            DVector::from_vec(vec![1.0e308]),
+            DVector::from_vec(vec![-1.0e308]),
+        ];
+
+        assert!(McmcDiagnostics::from_single_chain(&samples).is_err());
+    }
+
+    #[test]
     fn test_r_hat_identical_chains() {
         let chain1 = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let chain2 = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let chains = vec![chain1, chain2];
 
         let r_hat = calculate_r_hat(&chains).unwrap();
-        // For identical chains, R-hat should be close to 1.0, but numerical precision
-        // can cause small deviations with short chains
-        assert!((0.8..=1.2).contains(&r_hat));
+        assert_abs_diff_eq!(r_hat, 1.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_trace_plot_rejects_inconsistent_dimensions() {
+        let samples = vec![
+            DVector::from_vec(vec![1.0, 2.0]),
+            DVector::from_vec(vec![1.0]),
+        ];
+
+        assert!(TracePlot::new(&samples, 1).is_err());
     }
 
     #[test]
