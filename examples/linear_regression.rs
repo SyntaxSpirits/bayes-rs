@@ -22,9 +22,11 @@ fn generate_data(
     noise_std: f64,
 ) -> (Vec<f64>, Vec<f64>) {
     use rand::prelude::*;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
     use rand_distr::Normal as RandNormal;
 
-    let mut rng = thread_rng();
+    let mut rng = StdRng::seed_from_u64(42);
     let noise_dist = RandNormal::new(0.0, noise_std).unwrap();
 
     let mut x = Vec::new();
@@ -89,7 +91,8 @@ fn bayesian_linear_regression_mh(x: &[f64], y: &[f64]) -> Result<Vec<DVector<f64
     let initial_state = DVector::from_vec(vec![0.0, 0.0, 0.0]);
     let proposal_std = DVector::from_vec(vec![0.5, 0.1, 0.1]);
 
-    let mut sampler = MetropolisHastings::new(log_posterior, initial_state, proposal_std)?;
+    let mut sampler =
+        MetropolisHastings::with_seed(log_posterior, initial_state, proposal_std, 43)?;
 
     // Warm-up phase
     let _ = sampler.sample(1000);
@@ -185,12 +188,13 @@ fn bayesian_linear_regression_hmc(x: &[f64], y: &[f64]) -> Result<Vec<DVector<f6
     let step_size = 0.01;
     let n_leapfrog = 50;
 
-    let mut sampler = HamiltonianMonteCarlo::new(
+    let mut sampler = HamiltonianMonteCarlo::with_seed(
         log_posterior,
         gradient,
         initial_state,
         step_size,
         n_leapfrog,
+        44,
     )?;
 
     // Warm-up phase
