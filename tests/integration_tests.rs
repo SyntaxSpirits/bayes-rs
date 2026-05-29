@@ -34,7 +34,8 @@ fn test_simple_normal_inference() {
     let initial_state = DVector::from_vec(vec![0.0, 0.0]);
     let proposal_std = DVector::from_vec(vec![0.3, 0.2]);
 
-    let mut sampler = MetropolisHastings::new(log_posterior, initial_state, proposal_std).unwrap();
+    let mut sampler =
+        MetropolisHastings::with_seed(log_posterior, initial_state, proposal_std, 1001).unwrap();
     let samples = sampler.sample(5000);
 
     // Check that we got the right number of samples
@@ -98,7 +99,8 @@ fn test_multivariate_normal_inference() {
     let initial_state = DVector::zeros(dim);
     let proposal_std = DVector::from_element(dim, 0.3);
 
-    let mut sampler = MetropolisHastings::new(log_posterior, initial_state, proposal_std).unwrap();
+    let mut sampler =
+        MetropolisHastings::with_seed(log_posterior, initial_state, proposal_std, 1002).unwrap();
     let samples = sampler.sample(3000);
 
     let diagnostics = McmcDiagnostics::from_single_chain(&samples).unwrap();
@@ -131,17 +133,19 @@ fn test_hmc_vs_mh() {
     // MH sampler - use smaller proposal std for better mixing on standard normal
     let proposal_std = DVector::from_element(2, 0.3);
     let mut mh_sampler =
-        MetropolisHastings::new(&log_posterior, initial_state.clone(), proposal_std).unwrap();
+        MetropolisHastings::with_seed(&log_posterior, initial_state.clone(), proposal_std, 1003)
+            .unwrap();
 
     // HMC sampler
     let step_size = 0.1;
     let n_leapfrog = 10;
-    let mut hmc_sampler = HamiltonianMonteCarlo::new(
+    let mut hmc_sampler = HamiltonianMonteCarlo::with_seed(
         &log_posterior,
         &gradient,
         initial_state,
         step_size,
         n_leapfrog,
+        2003,
     )
     .unwrap();
 
@@ -191,7 +195,8 @@ fn test_beta_binomial_model() {
     let initial_state = DVector::from_vec(vec![0.5]);
     let proposal_std = DVector::from_vec(vec![0.1]);
 
-    let mut sampler = MetropolisHastings::new(log_posterior, initial_state, proposal_std).unwrap();
+    let mut sampler =
+        MetropolisHastings::with_seed(log_posterior, initial_state, proposal_std, 1004).unwrap();
     let samples = sampler.sample(5000);
 
     let diagnostics = McmcDiagnostics::from_single_chain(&samples).unwrap();
@@ -221,8 +226,13 @@ fn test_multiple_chains_diagnostics() {
         let initial_state = DVector::from_vec(vec![i as f64 * 0.5]); // Different starting points
         let proposal_std = DVector::from_vec(vec![0.5]);
 
-        let mut sampler =
-            MetropolisHastings::new(&log_posterior, initial_state, proposal_std).unwrap();
+        let mut sampler = MetropolisHastings::with_seed(
+            &log_posterior,
+            initial_state,
+            proposal_std,
+            3000 + i as u64,
+        )
+        .unwrap();
 
         chains.push(sampler.sample(n_samples));
     }
@@ -252,7 +262,8 @@ fn test_trace_plot() {
     let initial_state = DVector::from_vec(vec![0.0]);
     let proposal_std = DVector::from_vec(vec![0.5]);
 
-    let mut sampler = MetropolisHastings::new(log_posterior, initial_state, proposal_std).unwrap();
+    let mut sampler =
+        MetropolisHastings::with_seed(log_posterior, initial_state, proposal_std, 1005).unwrap();
     let samples = sampler.sample(100);
 
     let trace_plot = TracePlot::new(&samples, 0).unwrap();
@@ -294,7 +305,8 @@ fn test_gamma_poisson_model() {
     let initial_state = DVector::from_vec(vec![1.0]);
     let proposal_std = DVector::from_vec(vec![0.5]);
 
-    let mut sampler = MetropolisHastings::new(log_posterior, initial_state, proposal_std).unwrap();
+    let mut sampler =
+        MetropolisHastings::with_seed(log_posterior, initial_state, proposal_std, 1006).unwrap();
     let samples = sampler.sample(5000);
 
     let diagnostics = McmcDiagnostics::from_single_chain(&samples).unwrap();
@@ -319,7 +331,8 @@ fn test_sampler_adaptation() {
     let initial_state = DVector::from_vec(vec![0.0]);
     let proposal_std = DVector::from_vec(vec![2.0]); // Start with large proposal
 
-    let mut sampler = MetropolisHastings::new(log_posterior, initial_state, proposal_std).unwrap();
+    let mut sampler =
+        MetropolisHastings::with_seed(log_posterior, initial_state, proposal_std, 1007).unwrap();
 
     // Run some samples to get initial acceptance rate
     let _warmup = sampler.sample(500);

@@ -3,6 +3,8 @@
 use crate::error::{BayesError, Result};
 use nalgebra::DVector;
 use rand::prelude::*;
+use rand::rngs::{StdRng, ThreadRng};
+use rand::SeedableRng;
 use rand_distr::{Distribution as RandDistribution, Normal as RandNormal};
 
 /// Trait for MCMC samplers
@@ -23,14 +25,14 @@ pub trait Sampler {
 }
 
 /// Metropolis-Hastings sampler
-pub struct MetropolisHastings<F> {
+pub struct MetropolisHastings<F, R = ThreadRng> {
     log_posterior: F,
     current_state: DVector<f64>,
     proposal_std: DVector<f64>,
     current_log_posterior: f64,
     n_accepted: usize,
     n_total: usize,
-    rng: ThreadRng,
+    rng: R,
 }
 
 impl<F> MetropolisHastings<F>
@@ -42,6 +44,42 @@ where
         log_posterior: F,
         initial_state: DVector<f64>,
         proposal_std: DVector<f64>,
+    ) -> Result<Self> {
+        MetropolisHastings::with_rng(log_posterior, initial_state, proposal_std, thread_rng())
+    }
+}
+
+impl<F> MetropolisHastings<F, StdRng>
+where
+    F: Fn(&DVector<f64>) -> f64,
+{
+    /// Create a new Metropolis-Hastings sampler with a reproducible seed.
+    pub fn with_seed(
+        log_posterior: F,
+        initial_state: DVector<f64>,
+        proposal_std: DVector<f64>,
+        seed: u64,
+    ) -> Result<Self> {
+        MetropolisHastings::with_rng(
+            log_posterior,
+            initial_state,
+            proposal_std,
+            StdRng::seed_from_u64(seed),
+        )
+    }
+}
+
+impl<F, R> MetropolisHastings<F, R>
+where
+    F: Fn(&DVector<f64>) -> f64,
+    R: Rng,
+{
+    /// Create a new Metropolis-Hastings sampler with a caller-provided RNG.
+    pub fn with_rng(
+        log_posterior: F,
+        initial_state: DVector<f64>,
+        proposal_std: DVector<f64>,
+        rng: R,
     ) -> Result<Self> {
         if initial_state.len() != proposal_std.len() {
             return Err(BayesError::dimension_mismatch(
@@ -70,7 +108,7 @@ where
             current_log_posterior,
             n_accepted: 0,
             n_total: 0,
-            rng: thread_rng(),
+            rng,
         })
     }
 
@@ -106,9 +144,10 @@ where
     }
 }
 
-impl<F> Sampler for MetropolisHastings<F>
+impl<F, R> Sampler for MetropolisHastings<F, R>
 where
     F: Fn(&DVector<f64>) -> f64,
+    R: Rng,
 {
     fn sample(&mut self, n_samples: usize) -> Vec<DVector<f64>> {
         let mut samples = Vec::with_capacity(n_samples);
@@ -165,10 +204,10 @@ where
 }
 
 /// Gibbs sampler for conditional distributions
-pub struct GibbsSampler<F> {
+pub struct GibbsSampler<F, R = ThreadRng> {
     conditional_samplers: Vec<F>,
     current_state: DVector<f64>,
-    rng: ThreadRng,
+    rng: R,
 }
 
 impl<F> GibbsSampler<F>
@@ -177,6 +216,38 @@ where
 {
     /// Create a new Gibbs sampler
     pub fn new(conditional_samplers: Vec<F>, initial_state: DVector<f64>) -> Result<Self> {
+        GibbsSampler::with_rng(conditional_samplers, initial_state, thread_rng())
+    }
+}
+
+impl<F> GibbsSampler<F, StdRng>
+where
+    F: Fn(&DVector<f64>, usize, &mut StdRng) -> f64,
+{
+    /// Create a new Gibbs sampler with a reproducible seed.
+    pub fn with_seed(
+        conditional_samplers: Vec<F>,
+        initial_state: DVector<f64>,
+        seed: u64,
+    ) -> Result<Self> {
+        GibbsSampler::with_rng(
+            conditional_samplers,
+            initial_state,
+            StdRng::seed_from_u64(seed),
+        )
+    }
+}
+
+impl<F, R> GibbsSampler<F, R>
+where
+    F: Fn(&DVector<f64>, usize, &mut R) -> f64,
+{
+    /// Create a new Gibbs sampler with a caller-provided RNG.
+    pub fn with_rng(
+        conditional_samplers: Vec<F>,
+        initial_state: DVector<f64>,
+        rng: R,
+    ) -> Result<Self> {
         if conditional_samplers.len() != initial_state.len() {
             return Err(BayesError::dimension_mismatch(
                 conditional_samplers.len(),
@@ -187,14 +258,14 @@ where
         Ok(Self {
             conditional_samplers,
             current_state: initial_state,
-            rng: thread_rng(),
+            rng,
         })
     }
 }
 
-impl<F> Sampler for GibbsSampler<F>
+impl<F, R> Sampler for GibbsSampler<F, R>
 where
-    F: Fn(&DVector<f64>, usize, &mut ThreadRng) -> f64,
+    F: Fn(&DVector<f64>, usize, &mut R) -> f64,
 {
     fn sample(&mut self, n_samples: usize) -> Vec<DVector<f64>> {
         let mut samples = Vec::with_capacity(n_samples);
@@ -222,7 +293,7 @@ where
 }
 
 /// Simple Hamiltonian Monte Carlo sampler
-pub struct HamiltonianMonteCarlo<F, G> {
+pub struct HamiltonianMonteCarlo<F, G, R = ThreadRng> {
     log_posterior: F,
     gradient: G,
     current_state: DVector<f64>,
@@ -232,7 +303,7 @@ pub struct HamiltonianMonteCarlo<F, G> {
     current_log_posterior: f64,
     n_accepted: usize,
     n_total: usize,
-    rng: ThreadRng,
+    rng: R,
 }
 
 impl<F, G> HamiltonianMonteCarlo<F, G>
@@ -247,6 +318,57 @@ where
         initial_state: DVector<f64>,
         step_size: f64,
         n_leapfrog: usize,
+    ) -> Result<Self> {
+        HamiltonianMonteCarlo::with_rng(
+            log_posterior,
+            gradient,
+            initial_state,
+            step_size,
+            n_leapfrog,
+            thread_rng(),
+        )
+    }
+}
+
+impl<F, G> HamiltonianMonteCarlo<F, G, StdRng>
+where
+    F: Fn(&DVector<f64>) -> f64,
+    G: Fn(&DVector<f64>) -> DVector<f64>,
+{
+    /// Create a new HMC sampler with a reproducible seed.
+    pub fn with_seed(
+        log_posterior: F,
+        gradient: G,
+        initial_state: DVector<f64>,
+        step_size: f64,
+        n_leapfrog: usize,
+        seed: u64,
+    ) -> Result<Self> {
+        HamiltonianMonteCarlo::with_rng(
+            log_posterior,
+            gradient,
+            initial_state,
+            step_size,
+            n_leapfrog,
+            StdRng::seed_from_u64(seed),
+        )
+    }
+}
+
+impl<F, G, R> HamiltonianMonteCarlo<F, G, R>
+where
+    F: Fn(&DVector<f64>) -> f64,
+    G: Fn(&DVector<f64>) -> DVector<f64>,
+    R: Rng,
+{
+    /// Create a new HMC sampler with a caller-provided RNG.
+    pub fn with_rng(
+        log_posterior: F,
+        gradient: G,
+        initial_state: DVector<f64>,
+        step_size: f64,
+        n_leapfrog: usize,
+        rng: R,
     ) -> Result<Self> {
         if step_size <= 0.0 {
             return Err(BayesError::invalid_parameter("Step size must be positive"));
@@ -278,7 +400,7 @@ where
             current_log_posterior,
             n_accepted: 0,
             n_total: 0,
-            rng: thread_rng(),
+            rng,
         })
     }
 
@@ -336,10 +458,11 @@ where
     }
 }
 
-impl<F, G> Sampler for HamiltonianMonteCarlo<F, G>
+impl<F, G, R> Sampler for HamiltonianMonteCarlo<F, G, R>
 where
     F: Fn(&DVector<f64>) -> f64,
     G: Fn(&DVector<f64>) -> DVector<f64>,
+    R: Rng,
 {
     fn sample(&mut self, n_samples: usize) -> Vec<DVector<f64>> {
         let mut samples = Vec::with_capacity(n_samples);
@@ -445,6 +568,30 @@ mod tests {
     }
 
     #[test]
+    fn test_metropolis_hastings_seed_reproducibility() {
+        let log_posterior = |params: &DVector<f64>| -> f64 {
+            let normal = Normal::new(0.0, 1.0).unwrap();
+            normal.log_pdf(params[0])
+        };
+
+        let initial_state = DVector::from_vec(vec![0.0]);
+        let proposal_std = DVector::from_vec(vec![0.5]);
+
+        let mut first = MetropolisHastings::with_seed(
+            log_posterior,
+            initial_state.clone(),
+            proposal_std.clone(),
+            42,
+        )
+        .unwrap();
+        let mut second =
+            MetropolisHastings::with_seed(log_posterior, initial_state, proposal_std, 42).unwrap();
+
+        assert_eq!(first.sample(100), second.sample(100));
+        assert_eq!(first.acceptance_rate(), second.acceptance_rate());
+    }
+
+    #[test]
     fn test_metropolis_hastings_acceptance_rate() {
         let log_posterior = |params: &DVector<f64>| -> f64 {
             let normal = Normal::new(0.0, 1.0).unwrap();
@@ -534,6 +681,35 @@ mod tests {
         let samples = sampler.sample(50);
         assert_eq!(samples.len(), 50);
         assert!(samples.iter().all(|s| s.len() == 1));
+    }
+
+    #[test]
+    fn test_hmc_seed_reproducibility() {
+        let log_posterior = |params: &DVector<f64>| -> f64 {
+            let normal = Normal::new(0.0, 1.0).unwrap();
+            normal.log_pdf(params[0])
+        };
+
+        let gradient =
+            |params: &DVector<f64>| -> DVector<f64> { DVector::from_vec(vec![-params[0]]) };
+
+        let initial_state = DVector::from_vec(vec![0.0]);
+
+        let mut first = HamiltonianMonteCarlo::with_seed(
+            log_posterior,
+            gradient,
+            initial_state.clone(),
+            0.1,
+            10,
+            7,
+        )
+        .unwrap();
+        let mut second =
+            HamiltonianMonteCarlo::with_seed(log_posterior, gradient, initial_state, 0.1, 10, 7)
+                .unwrap();
+
+        assert_eq!(first.sample(50), second.sample(50));
+        assert_eq!(first.acceptance_rate(), second.acceptance_rate());
     }
 
     #[test]

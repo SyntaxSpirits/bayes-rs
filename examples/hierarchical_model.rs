@@ -51,9 +51,11 @@ fn main() -> Result<()> {
 /// 3 groups with different means but shared population structure
 fn generate_hierarchical_data() -> Vec<Vec<f64>> {
     use rand::prelude::*;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
     use rand_distr::Normal as RandNormal;
 
-    let mut rng = thread_rng();
+    let mut rng = StdRng::seed_from_u64(42);
 
     // True parameters (unknown to the inference)
     let true_population_mean = 5.0;
@@ -151,7 +153,8 @@ fn hierarchical_inference(data: &[Vec<f64>]) -> Result<Vec<DVector<f64>>> {
     let initial_state = DVector::from_vec(initial_values);
     let proposal_std = DVector::from_vec(vec![0.5; n_params]);
 
-    let mut sampler = MetropolisHastings::new(log_posterior, initial_state, proposal_std)?;
+    let mut sampler =
+        MetropolisHastings::with_seed(log_posterior, initial_state, proposal_std, 43)?;
 
     // Warm-up
     let _ = sampler.sample(2000);

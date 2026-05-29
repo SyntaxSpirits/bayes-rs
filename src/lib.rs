@@ -32,11 +32,12 @@
 //! // Create data
 //! let data = vec![1.0, 2.0, 3.0, 2.5, 1.8];
 //!
-//! // Initialize sampler
-//! let mut sampler = MetropolisHastings::new(
+//! // Initialize sampler with a deterministic seed for reproducibility
+//! let mut sampler = MetropolisHastings::with_seed(
 //!     move |params| likelihood(params, &data) + prior(params),
 //!     DVector::from_vec(vec![0.0, 0.0]), // initial parameters
 //!     DVector::from_vec(vec![0.5, 0.2]), // proposal standard deviations
+//!     42,
 //! ).unwrap();
 //!
 //! // Run MCMC
