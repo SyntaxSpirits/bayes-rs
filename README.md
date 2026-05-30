@@ -56,10 +56,12 @@ let mut sampler = MetropolisHastings::new(
     proposal_std,
 ).unwrap();
 
-// Generate samples
-let samples = sampler.sample(10000);
-println!("Generated {} samples", samples.len());
+// Generate samples after discarding warmup iterations
+let samples = sampler.sample_with_warmup(1_000, 10_000);
+println!("Generated {} posterior samples", samples.len());
 ```
+
+`sample_with_warmup` discards initial iterations and resets sampler statistics before collecting the returned samples; it does not adapt proposal scales or other tuning parameters automatically.
 
 ## MCMC Samplers
 
@@ -76,10 +78,14 @@ let mut sampler = MetropolisHastings::new(
     proposal_std,
 )?;
 
-// Adaptive tuning
-sampler.adapt_proposal(0.44); // Target 44% acceptance rate
+// Run pilot adaptation before collecting samples
+for _ in 0..1_000 {
+    sampler.step();
+    sampler.adapt_proposal(0.44); // Target 44% acceptance rate
+}
+sampler.reset_statistics();
 
-let samples = sampler.sample(10000);
+let samples = sampler.sample(10_000);
 println!("Acceptance rate: {:.3}", sampler.acceptance_rate().unwrap());
 ```
 
