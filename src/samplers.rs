@@ -12,11 +12,32 @@ pub trait Sampler {
     /// Sample from the posterior distribution
     fn sample(&mut self, n_samples: usize) -> Vec<DVector<f64>>;
 
+    /// Run warmup iterations, discard those states, then collect posterior samples.
+    ///
+    /// Warmup iterations let a Markov chain move away from its initial state before
+    /// collecting draws for posterior summaries. This method does not perform
+    /// automatic adaptation; callers should tune sampler parameters separately when
+    /// their workflow requires it. Statistics such as acceptance rate are reset
+    /// after warmup, so they describe only the returned samples. Implementations
+    /// that maintain running statistics must override [`Sampler::reset_statistics`]
+    /// for this guarantee to hold.
+    fn sample_with_warmup(&mut self, n_warmup: usize, n_samples: usize) -> Vec<DVector<f64>> {
+        for _ in 0..n_warmup {
+            self.step();
+        }
+        self.reset_statistics();
+
+        self.sample(n_samples)
+    }
+
     /// Get a single sample
     fn step(&mut self) -> DVector<f64>;
 
     /// Get the current state
     fn current_state(&self) -> &DVector<f64>;
+
+    /// Reset sampler-level running statistics, such as acceptance counters.
+    fn reset_statistics(&mut self) {}
 
     /// Get acceptance rate (if applicable)
     fn acceptance_rate(&self) -> Option<f64> {
@@ -192,6 +213,11 @@ where
 
     fn current_state(&self) -> &DVector<f64> {
         &self.current_state
+    }
+
+    fn reset_statistics(&mut self) {
+        self.n_accepted = 0;
+        self.n_total = 0;
     }
 
     fn acceptance_rate(&self) -> Option<f64> {
@@ -521,6 +547,11 @@ where
         &self.current_state
     }
 
+    fn reset_statistics(&mut self) {
+        self.n_accepted = 0;
+        self.n_total = 0;
+    }
+
     fn acceptance_rate(&self) -> Option<f64> {
         if self.n_total > 0 {
             Some(self.n_accepted as f64 / self.n_total as f64)
@@ -611,6 +642,69 @@ mod tests {
         let _ = sampler.sample(10);
         let acceptance_rate = sampler.acceptance_rate().unwrap();
         assert!((0.0..=1.0).contains(&acceptance_rate));
+    }
+
+    #[test]
+    fn test_sample_with_warmup_discards_warmup_states() {
+        let log_posterior = |params: &DVector<f64>| -> f64 {
+            let normal = Normal::new(0.0, 1.0).unwrap();
+            normal.log_pdf(params[0])
+        };
+
+        let initial_state = DVector::from_vec(vec![0.0]);
+        let proposal_std = DVector::from_vec(vec![0.5]);
+
+        let mut warmup_sampler = MetropolisHastings::with_seed(
+            log_posterior,
+            initial_state.clone(),
+            proposal_std.clone(),
+            123,
+        )
+        .unwrap();
+        let warmup_samples = warmup_sampler.sample_with_warmup(25, 50);
+
+        let mut manual_sampler =
+            MetropolisHastings::with_seed(log_posterior, initial_state, proposal_std, 123).unwrap();
+        manual_sampler.sample(25);
+        manual_sampler.reset_statistics();
+        let retained_samples = manual_sampler.sample(50);
+
+        assert_eq!(warmup_samples.len(), 50);
+        assert_eq!(warmup_samples, retained_samples);
+        assert_eq!(
+            warmup_sampler.current_state(),
+            manual_sampler.current_state()
+        );
+        assert_eq!(
+            warmup_sampler.acceptance_rate(),
+            manual_sampler.acceptance_rate()
+        );
+    }
+
+    #[test]
+    fn test_sample_with_zero_warmup_matches_regular_sampling() {
+        let log_posterior = |params: &DVector<f64>| -> f64 {
+            let normal = Normal::new(0.0, 1.0).unwrap();
+            normal.log_pdf(params[0])
+        };
+
+        let initial_state = DVector::from_vec(vec![0.0]);
+        let proposal_std = DVector::from_vec(vec![0.5]);
+
+        let mut warmup_sampler = MetropolisHastings::with_seed(
+            log_posterior,
+            initial_state.clone(),
+            proposal_std.clone(),
+            456,
+        )
+        .unwrap();
+        let mut regular_sampler =
+            MetropolisHastings::with_seed(log_posterior, initial_state, proposal_std, 456).unwrap();
+
+        assert_eq!(
+            warmup_sampler.sample_with_warmup(0, 50),
+            regular_sampler.sample(50)
+        );
     }
 
     #[test]
@@ -710,6 +804,43 @@ mod tests {
 
         assert_eq!(first.sample(50), second.sample(50));
         assert_eq!(first.acceptance_rate(), second.acceptance_rate());
+    }
+
+    #[test]
+    fn test_hmc_sample_with_warmup_resets_acceptance_statistics() {
+        let log_posterior = |params: &DVector<f64>| -> f64 {
+            let normal = Normal::new(0.0, 1.0).unwrap();
+            normal.log_pdf(params[0])
+        };
+
+        let gradient =
+            |params: &DVector<f64>| -> DVector<f64> { DVector::from_vec(vec![-params[0]]) };
+
+        let initial_state = DVector::from_vec(vec![0.0]);
+
+        let mut warmup_sampler = HamiltonianMonteCarlo::with_seed(
+            log_posterior,
+            gradient,
+            initial_state.clone(),
+            0.1,
+            10,
+            99,
+        )
+        .unwrap();
+        let warmup_samples = warmup_sampler.sample_with_warmup(10, 20);
+
+        let mut manual_sampler =
+            HamiltonianMonteCarlo::with_seed(log_posterior, gradient, initial_state, 0.1, 10, 99)
+                .unwrap();
+        manual_sampler.sample(10);
+        manual_sampler.reset_statistics();
+        let retained_samples = manual_sampler.sample(20);
+
+        assert_eq!(warmup_samples, retained_samples);
+        assert_eq!(
+            warmup_sampler.acceptance_rate(),
+            manual_sampler.acceptance_rate()
+        );
     }
 
     #[test]
