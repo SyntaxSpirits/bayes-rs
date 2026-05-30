@@ -2,7 +2,13 @@
 
 use crate::error::{BayesError, Result};
 use nalgebra::DVector;
+use rand_distr::Distribution as RandDistribution;
 use std::f64::consts::PI;
+
+// rand_distr::Poisson samples through f64, so keep accepted rates comfortably
+// below extreme count ranges where precision and rejection-sampler behavior are
+// less appropriate for this crate's infallible u64 sampling API.
+const MAX_POISSON_SAMPLE_RATE: f64 = 1_000_000_000_000.0;
 
 /// Trait for probability distributions
 pub trait Distribution {
@@ -15,6 +21,24 @@ pub trait Distribution {
     }
 }
 
+/// Trait for scalar discrete probability distributions over non-negative integer support.
+///
+/// Constructors validate distribution parameters up front, so sampling is infallible.
+/// The `u64` support type is intended for count-valued distributions such as
+/// Bernoulli, Binomial, and Poisson.
+pub trait DiscreteDistribution {
+    /// Compute the log probability mass function at integer support value `k`
+    fn log_pmf(&self, k: u64) -> f64;
+
+    /// Compute the probability mass function at integer support value `k`
+    fn pmf(&self, k: u64) -> f64 {
+        self.log_pmf(k).exp()
+    }
+
+    /// Draw a sample from the distribution
+    fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> u64;
+}
+
 /// Multivariate distribution trait
 pub trait MultivariateDistribution {
     /// Compute the log probability density function for a vector
@@ -23,6 +47,193 @@ pub trait MultivariateDistribution {
     /// Compute the probability density function for a vector
     fn pdf(&self, x: &DVector<f64>) -> f64 {
         self.log_pdf(x).exp()
+    }
+}
+
+/// Bernoulli distribution over {0, 1}
+#[derive(Debug, Clone, PartialEq)]
+pub struct Bernoulli {
+    p: f64,
+}
+
+impl Bernoulli {
+    /// Create a new Bernoulli distribution with success probability `p`.
+    pub fn new(p: f64) -> Result<Self> {
+        if !p.is_finite() || !(0.0..=1.0).contains(&p) {
+            return Err(BayesError::invalid_parameter(
+                "probability must be finite and between 0 and 1",
+            ));
+        }
+
+        Ok(Self { p })
+    }
+
+    /// Get the success probability.
+    pub fn probability(&self) -> f64 {
+        self.p
+    }
+
+    /// Get the mean.
+    pub fn mean(&self) -> f64 {
+        self.p
+    }
+
+    /// Get the variance.
+    pub fn variance(&self) -> f64 {
+        self.p * (1.0 - self.p)
+    }
+}
+
+impl DiscreteDistribution for Bernoulli {
+    fn log_pmf(&self, k: u64) -> f64 {
+        match k {
+            0 => {
+                if self.p == 1.0 {
+                    f64::NEG_INFINITY
+                } else {
+                    (-self.p).ln_1p()
+                }
+            }
+            1 => {
+                if self.p == 0.0 {
+                    f64::NEG_INFINITY
+                } else {
+                    self.p.ln()
+                }
+            }
+            _ => f64::NEG_INFINITY,
+        }
+    }
+
+    fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> u64 {
+        if rng.gen_bool(self.p) {
+            1
+        } else {
+            0
+        }
+    }
+}
+
+/// Binomial distribution counting successes in `n` Bernoulli trials
+#[derive(Debug, Clone, PartialEq)]
+pub struct Binomial {
+    n: u64,
+    p: f64,
+}
+
+impl Binomial {
+    /// Create a new binomial distribution with `n` trials and success probability `p`.
+    pub fn new(n: u64, p: f64) -> Result<Self> {
+        if !p.is_finite() || !(0.0..=1.0).contains(&p) {
+            return Err(BayesError::invalid_parameter(
+                "probability must be finite and between 0 and 1",
+            ));
+        }
+
+        Ok(Self { n, p })
+    }
+
+    /// Get the number of trials.
+    pub fn trials(&self) -> u64 {
+        self.n
+    }
+
+    /// Get the success probability.
+    pub fn probability(&self) -> f64 {
+        self.p
+    }
+
+    /// Get the mean.
+    pub fn mean(&self) -> f64 {
+        self.n as f64 * self.p
+    }
+
+    /// Get the variance.
+    pub fn variance(&self) -> f64 {
+        self.n as f64 * self.p * (1.0 - self.p)
+    }
+}
+
+impl DiscreteDistribution for Binomial {
+    fn log_pmf(&self, k: u64) -> f64 {
+        if k > self.n {
+            return f64::NEG_INFINITY;
+        }
+
+        if self.p == 0.0 {
+            return if k == 0 { 0.0 } else { f64::NEG_INFINITY };
+        }
+        if self.p == 1.0 {
+            return if k == self.n { 0.0 } else { f64::NEG_INFINITY };
+        }
+
+        log_binomial_coefficient(self.n, k)
+            + k as f64 * self.p.ln()
+            + (self.n - k) as f64 * (-self.p).ln_1p()
+    }
+
+    fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> u64 {
+        if self.p == 0.0 {
+            return 0;
+        }
+        if self.p == 1.0 {
+            return self.n;
+        }
+
+        let binomial = rand_distr::Binomial::new(self.n, self.p)
+            .expect("validated binomial parameters should be accepted by rand_distr");
+        binomial.sample(rng)
+    }
+}
+
+/// Poisson distribution over non-negative integer counts
+#[derive(Debug, Clone, PartialEq)]
+pub struct Poisson {
+    lambda: f64,
+}
+
+impl Poisson {
+    /// Create a new Poisson distribution with rate `lambda`.
+    ///
+    /// `lambda` must be finite, positive, and no greater than `1e12`. The upper
+    /// bound keeps sampling well inside the integer precision range of the
+    /// underlying `rand_distr::Poisson<f64>` sampler.
+    pub fn new(lambda: f64) -> Result<Self> {
+        if !lambda.is_finite() || lambda <= 0.0 || lambda > MAX_POISSON_SAMPLE_RATE {
+            return Err(BayesError::invalid_parameter(format!(
+                "lambda must be finite, positive, and no greater than {MAX_POISSON_SAMPLE_RATE:e}",
+            )));
+        }
+
+        Ok(Self { lambda })
+    }
+
+    /// Get the rate parameter.
+    pub fn rate(&self) -> f64 {
+        self.lambda
+    }
+
+    /// Get the mean.
+    pub fn mean(&self) -> f64 {
+        self.lambda
+    }
+
+    /// Get the variance.
+    pub fn variance(&self) -> f64 {
+        self.lambda
+    }
+}
+
+impl DiscreteDistribution for Poisson {
+    fn log_pmf(&self, k: u64) -> f64 {
+        k as f64 * self.lambda.ln() - self.lambda - gamma_ln(k as f64 + 1.0)
+    }
+
+    fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> u64 {
+        let poisson = rand_distr::Poisson::new(self.lambda)
+            .expect("validated Poisson rate should be accepted by rand_distr");
+        // rand_distr's Poisson sampler returns integer-valued f64 samples.
+        poisson.sample(rng) as u64
     }
 }
 
@@ -465,26 +676,221 @@ impl Distribution for StudentT {
     }
 }
 
-/// Approximation of log gamma function using Stirling's approximation
-fn gamma_ln(x: f64) -> f64 {
-    if x <= 0.0 {
+/// Natural logarithm of the binomial coefficient, `ln(n choose k)`.
+fn log_binomial_coefficient(n: u64, k: u64) -> f64 {
+    if k > n {
         return f64::NEG_INFINITY;
     }
 
-    // For small values, use a simple approximation
-    // For production use, consider using a more accurate implementation
-    if x < 1.0 {
-        gamma_ln(x + 1.0) - x.ln()
-    } else {
-        // Stirling's approximation
-        (x - 0.5) * x.ln() - x + 0.5 * (2.0 * PI).ln()
+    if k == 0 || k == n {
+        return 0.0;
     }
+
+    gamma_ln(n as f64 + 1.0) - gamma_ln(k as f64 + 1.0) - gamma_ln((n - k) as f64 + 1.0)
+}
+
+/// Approximation of the log gamma function using the Lanczos approximation.
+///
+/// This helper is defined for positive finite inputs, which covers the
+/// distribution normalizers used in this crate.
+fn gamma_ln(x: f64) -> f64 {
+    if x <= 0.0 || !x.is_finite() {
+        return f64::NEG_INFINITY;
+    }
+
+    // Coefficients for g=7, n=9 from Numerical Recipes.
+    const COEFFS: [f64; 9] = [
+        0.999_999_999_999_809_9,
+        676.520_368_121_885_1,
+        -1_259.139_216_722_402_8,
+        771.323_428_777_653_1,
+        -176.615_029_162_140_6,
+        12.507_343_278_686_905,
+        -0.138_571_095_265_720_12,
+        9.984_369_578_019_572e-6,
+        1.505_632_735_149_311_6e-7,
+    ];
+
+    if x < 0.5 {
+        return PI.ln() - (PI * x).sin().ln() - gamma_ln(1.0 - x);
+    }
+
+    let z = x - 1.0;
+    let mut a = COEFFS[0];
+    for (i, coeff) in COEFFS.iter().enumerate().skip(1) {
+        a += coeff / (z + i as f64);
+    }
+    let t = z + 7.5;
+
+    0.5 * (2.0 * PI).ln() + (z + 0.5) * t.ln() - t + a.ln()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
+    use rand::SeedableRng;
+
+    #[test]
+    fn test_bernoulli_distribution() {
+        let bernoulli = Bernoulli::new(0.25).unwrap();
+        assert_eq!(bernoulli.probability(), 0.25);
+        assert_eq!(bernoulli.mean(), 0.25);
+        assert_abs_diff_eq!(bernoulli.variance(), 0.1875, epsilon = 1e-12);
+
+        assert_abs_diff_eq!(bernoulli.pmf(0), 0.75, epsilon = 1e-12);
+        assert_abs_diff_eq!(bernoulli.pmf(1), 0.25, epsilon = 1e-12);
+        assert_eq!(bernoulli.pmf(2), 0.0);
+        assert_abs_diff_eq!(bernoulli.log_pmf(1), 0.25_f64.ln(), epsilon = 1e-12);
+
+        let rare_success = Bernoulli::new(1.0e-12).unwrap();
+        assert_abs_diff_eq!(
+            rare_success.log_pmf(0),
+            (-1.0e-12_f64).ln_1p(),
+            epsilon = 1e-24
+        );
+    }
+
+    #[test]
+    fn test_bernoulli_edge_cases() {
+        let always_zero = Bernoulli::new(0.0).unwrap();
+        assert_eq!(always_zero.pmf(0), 1.0);
+        assert_eq!(always_zero.pmf(1), 0.0);
+        assert_eq!(always_zero.log_pmf(1), f64::NEG_INFINITY);
+
+        let always_one = Bernoulli::new(1.0).unwrap();
+        assert_eq!(always_one.pmf(0), 0.0);
+        assert_eq!(always_one.pmf(1), 1.0);
+        assert_eq!(always_one.log_pmf(0), f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn test_bernoulli_invalid_params() {
+        assert!(Bernoulli::new(-0.1).is_err());
+        assert!(Bernoulli::new(1.1).is_err());
+        assert!(Bernoulli::new(f64::NAN).is_err());
+        assert!(Bernoulli::new(f64::INFINITY).is_err());
+    }
+
+    #[test]
+    fn test_bernoulli_sampling_seeded() {
+        let bernoulli = Bernoulli::new(0.5).unwrap();
+        let mut rng_a = rand::rngs::StdRng::seed_from_u64(42);
+        let mut rng_b = rand::rngs::StdRng::seed_from_u64(42);
+        let samples_a: Vec<_> = (0..16).map(|_| bernoulli.sample(&mut rng_a)).collect();
+        let samples_b: Vec<_> = (0..16).map(|_| bernoulli.sample(&mut rng_b)).collect();
+
+        assert_eq!(samples_a, samples_b);
+        assert!(samples_a.iter().all(|&x| x <= 1));
+    }
+
+    #[test]
+    fn test_binomial_distribution() {
+        let binomial = Binomial::new(10, 0.5).unwrap();
+        assert_eq!(binomial.trials(), 10);
+        assert_eq!(binomial.probability(), 0.5);
+        assert_abs_diff_eq!(binomial.mean(), 5.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(binomial.variance(), 2.5, epsilon = 1e-12);
+
+        assert_abs_diff_eq!(binomial.pmf(0), 1.0 / 1024.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(binomial.pmf(5), 252.0 / 1024.0, epsilon = 1e-12);
+        assert_eq!(binomial.pmf(11), 0.0);
+        assert_eq!(binomial.log_pmf(11), f64::NEG_INFINITY);
+        assert_abs_diff_eq!(
+            binomial.log_pmf(5),
+            (252.0_f64 / 1024.0).ln(),
+            epsilon = 1e-12
+        );
+    }
+
+    #[test]
+    fn test_binomial_edge_cases() {
+        let zero_prob = Binomial::new(4, 0.0).unwrap();
+        assert_eq!(zero_prob.pmf(0), 1.0);
+        assert_eq!(zero_prob.pmf(1), 0.0);
+        assert_eq!(zero_prob.sample(&mut rand::thread_rng()), 0);
+
+        let one_prob = Binomial::new(4, 1.0).unwrap();
+        assert_eq!(one_prob.pmf(3), 0.0);
+        assert_eq!(one_prob.pmf(4), 1.0);
+        assert_eq!(one_prob.sample(&mut rand::thread_rng()), 4);
+
+        let zero_trials = Binomial::new(0, 0.75).unwrap();
+        assert_eq!(zero_trials.pmf(0), 1.0);
+        assert_eq!(zero_trials.pmf(1), 0.0);
+        assert_eq!(zero_trials.sample(&mut rand::thread_rng()), 0);
+    }
+
+    #[test]
+    fn test_binomial_invalid_params() {
+        assert!(Binomial::new(10, -0.1).is_err());
+        assert!(Binomial::new(10, 1.1).is_err());
+        assert!(Binomial::new(10, f64::NAN).is_err());
+        assert!(Binomial::new(10, f64::INFINITY).is_err());
+    }
+
+    #[test]
+    fn test_binomial_sampling_seeded() {
+        let binomial = Binomial::new(20, 0.25).unwrap();
+        let mut rng_a = rand::rngs::StdRng::seed_from_u64(7);
+        let mut rng_b = rand::rngs::StdRng::seed_from_u64(7);
+        let samples_a: Vec<_> = (0..8).map(|_| binomial.sample(&mut rng_a)).collect();
+        let samples_b: Vec<_> = (0..8).map(|_| binomial.sample(&mut rng_b)).collect();
+
+        assert_eq!(samples_a, samples_b);
+        assert!(samples_a.iter().all(|&x| x <= binomial.trials()));
+
+        let large_n = Binomial::new(1_000_000, 0.0001).unwrap();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(11);
+        assert!(large_n.sample(&mut rng) <= large_n.trials());
+    }
+
+    #[test]
+    fn test_poisson_distribution() {
+        let poisson = Poisson::new(3.0).unwrap();
+        assert_eq!(poisson.rate(), 3.0);
+        assert_eq!(poisson.mean(), 3.0);
+        assert_eq!(poisson.variance(), 3.0);
+
+        assert_abs_diff_eq!(poisson.pmf(0), (-3.0_f64).exp(), epsilon = 1e-12);
+        assert_abs_diff_eq!(poisson.pmf(2), 4.5 * (-3.0_f64).exp(), epsilon = 1e-12);
+        assert_abs_diff_eq!(
+            poisson.log_pmf(2),
+            (4.5_f64 * (-3.0_f64).exp()).ln(),
+            epsilon = 1e-12
+        );
+    }
+
+    #[test]
+    fn test_poisson_invalid_params() {
+        assert!(Poisson::new(0.0).is_err());
+        assert!(Poisson::new(-1.0).is_err());
+        assert!(Poisson::new(f64::NAN).is_err());
+        assert!(Poisson::new(f64::INFINITY).is_err());
+        assert!(Poisson::new(MAX_POISSON_SAMPLE_RATE).is_ok());
+        assert!(Poisson::new(MAX_POISSON_SAMPLE_RATE * 2.0).is_err());
+    }
+
+    #[test]
+    fn test_poisson_sampling_seeded() {
+        let poisson = Poisson::new(4.0).unwrap();
+        let mut rng_a = rand::rngs::StdRng::seed_from_u64(99);
+        let mut rng_b = rand::rngs::StdRng::seed_from_u64(99);
+        let samples_a: Vec<_> = (0..8).map(|_| poisson.sample(&mut rng_a)).collect();
+        let samples_b: Vec<_> = (0..8).map(|_| poisson.sample(&mut rng_b)).collect();
+
+        assert_eq!(samples_a, samples_b);
+        assert!(samples_a.iter().all(|&x| x < 100));
+    }
+
+    #[test]
+    fn test_gamma_ln_known_values() {
+        assert_abs_diff_eq!(gamma_ln(0.5), 0.5 * PI.ln(), epsilon = 1e-12);
+        assert_abs_diff_eq!(gamma_ln(1.0e-8), 18.42068073818021, epsilon = 1e-12);
+        assert_abs_diff_eq!(gamma_ln(1.0), 0.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(gamma_ln(5.0), 24.0_f64.ln(), epsilon = 1e-12);
+        assert_abs_diff_eq!(gamma_ln(10.0), 362_880.0_f64.ln(), epsilon = 1e-10);
+    }
 
     #[test]
     fn test_normal_creation() {
@@ -541,6 +947,7 @@ mod tests {
         // Test PDF is finite for positive values
         assert!(gamma.pdf(1.0) > 0.0);
         assert!(gamma.pdf(1.0).is_finite());
+        assert_abs_diff_eq!(gamma.log_pdf(1.0), -1.0, epsilon = 1e-12);
 
         // Test PDF is zero for non-positive values
         assert_eq!(gamma.pdf(0.0), 0.0);
@@ -566,6 +973,7 @@ mod tests {
         // Test PDF for values in [0, 1]
         assert!(beta.pdf(0.5) > 0.0);
         assert!(beta.pdf(0.5).is_finite());
+        assert_abs_diff_eq!(beta.pdf(0.5), 1.5, epsilon = 1e-12);
 
         // Test PDF is zero outside [0, 1]
         assert_eq!(beta.pdf(0.0), 0.0);
