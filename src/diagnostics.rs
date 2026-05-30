@@ -1,27 +1,92 @@
-//! MCMC diagnostics and convergence assessment
+//! MCMC diagnostics and convergence assessment.
+//!
+//! This module summarizes Markov chain Monte Carlo output with common
+//! user-facing diagnostics:
+//!
+//! - **Effective sample size (ESS)** estimates how many independent draws would
+//!   carry the same information as an autocorrelated chain. For a single chain
+//!   with `n` draws this implementation computes autocorrelations `rho_t`, an
+//!   integrated autocorrelation time `tau = sum_t rho_t`, and returns
+//!   `n / (1 + 2 * tau)` when `tau > 0`; otherwise it falls back to `n`.
+//! - **R-hat** is the Gelman-Rubin potential scale reduction factor. For `m`
+//!   equal-length chains of length `n`, it computes within-chain variance `W`,
+//!   between-chain variance `B`, `var+ = ((n - 1) / n) * W + B / n`, and
+//!   `sqrt(var+ / W)`.
+//! - **Monte Carlo standard error (MCSE)** is `sqrt(variance / ESS)` for a
+//!   single chain. For multiple chains, MCSE uses the pooled variance divided by
+//!   the sum of per-chain ESS estimates so unrelated chain boundaries are not
+//!   treated as adjacent Markov states.
+//! - **Autocorrelation** at lag `t` is calculated as the lagged covariance sum
+//!   `sum_i ((x_i - mean) * (x_{i+t} - mean)) / ((n - t) * sample_variance)`.
+//!   Lags are evaluated in the half-open range `0..min(n / 4, 100)`. The
+//!   integrated autocorrelation sum truncates when correlation drops below
+//!   `0.01` or when the lag exceeds `6 * tau`.
+//!
+//! Edge cases are handled explicitly. Empty sample sets, zero-dimensional
+//! samples, non-finite values, inconsistent dimensions, unequal chain lengths,
+//! and fewer than two samples per chain for R-hat return errors. Constant chains
+//! have zero variance, zero MCSE, and ESS equal to the chain length. Identical
+//! constant chains have R-hat `1.0`; constant chains with different means make
+//! R-hat undefined and return an error.
+//!
+//! Convergence helpers use the public [`R_HAT_CONVERGENCE_THRESHOLD`] and
+//! [`LOW_ESS_THRESHOLD`] constants so applications and documentation can share
+//! the same thresholds.
 
 use crate::error::{BayesError, Result};
 use nalgebra::DVector;
 
-/// MCMC diagnostic statistics
+/// Default R-hat convergence threshold used by [`McmcDiagnostics::has_converged`].
+///
+/// A parameter is treated as converged only when its R-hat is strictly less than
+/// this value. A value exactly equal to the threshold does not pass.
+pub const R_HAT_CONVERGENCE_THRESHOLD: f64 = 1.1;
+
+/// Default low effective sample size threshold used by [`McmcDiagnostics::low_ess_params`].
+///
+/// A parameter is reported as low-ESS only when its ESS is strictly less than
+/// this value. A value exactly equal to the threshold is not reported.
+pub const LOW_ESS_THRESHOLD: f64 = 400.0;
+
+/// MCMC diagnostic statistics for each model parameter.
+///
+/// Diagnostics can be created from one chain with [`Self::from_single_chain`] or
+/// from multiple chains with [`Self::from_multiple_chains`]. Vectors are ordered
+/// by parameter index.
 #[derive(Debug, Clone)]
 pub struct McmcDiagnostics {
-    /// Effective sample size for each parameter
+    /// Effective sample size for each parameter.
+    ///
+    /// For one chain, ESS is based on `n / (1 + 2 * tau)` where `tau` is the
+    /// truncated integrated autocorrelation time. For multiple chains, this is
+    /// the sum of each chain's ESS for the parameter.
     pub effective_sample_size: Vec<f64>,
-    /// R-hat statistic for each parameter (requires multiple chains)
+    /// R-hat statistic for each parameter, or `None` for single-chain diagnostics.
+    ///
+    /// R-hat requires at least two chains with at least two samples each. The
+    /// implementation returns `1.0` for identical constant chains and an error
+    /// for constant chains with different means because the ratio is undefined.
     pub r_hat: Option<Vec<f64>>,
-    /// Monte Carlo standard error for each parameter
+    /// Monte Carlo standard error for each parameter.
+    ///
+    /// MCSE is `sqrt(variance / ESS)`, with `0.0` returned for zero-variance
+    /// chains.
     pub mc_se: Vec<f64>,
-    /// Mean of each parameter
+    /// Mean of each parameter.
     pub mean: Vec<f64>,
-    /// Standard deviation of each parameter
+    /// Sample standard deviation of each parameter.
     pub std_dev: Vec<f64>,
-    /// Quantiles (2.5%, 25%, 50%, 75%, 97.5%)
+    /// Empirical quantiles for each parameter: 2.5%, 25%, 50%, 75%, and 97.5%.
     pub quantiles: Vec<[f64; 5]>,
 }
 
 impl McmcDiagnostics {
-    /// Create diagnostics from a single chain
+    /// Create diagnostics from a single chain.
+    ///
+    /// Returns an error if `samples` is empty, if samples contain zero
+    /// parameters, if dimensions differ across samples, if any value is
+    /// non-finite, or if a computed diagnostic is non-finite. R-hat is not
+    /// available for one chain and is set to `None`.
     pub fn from_single_chain(samples: &[DVector<f64>]) -> Result<Self> {
         validate_samples(samples)?;
         let n_params = samples[0].len();
@@ -75,7 +140,12 @@ impl McmcDiagnostics {
         })
     }
 
-    /// Create diagnostics from multiple chains
+    /// Create diagnostics from multiple chains.
+    ///
+    /// Each chain must be non-empty, finite, have the same sample count, and use
+    /// the same parameter dimension. R-hat additionally requires at least two
+    /// samples per chain. Multi-chain ESS sums per-chain ESS estimates; MCSE is
+    /// computed from pooled variance divided by that summed ESS.
     pub fn from_multiple_chains(chains: &[Vec<DVector<f64>>]) -> Result<Self> {
         if chains.is_empty() {
             return Err(BayesError::invalid_parameter("No chains provided"));
@@ -158,26 +228,38 @@ impl McmcDiagnostics {
         })
     }
 
-    /// Check if chains have converged (R-hat < 1.1)
+    /// Check whether all parameters satisfy the R-hat convergence threshold.
+    ///
+    /// Returns `true` only when every available R-hat is strictly less than
+    /// [`R_HAT_CONVERGENCE_THRESHOLD`]. Returns `false` for single-chain
+    /// diagnostics because convergence cannot be assessed without multiple
+    /// chains.
     pub fn has_converged(&self) -> bool {
         if let Some(ref r_hat) = self.r_hat {
-            r_hat.iter().all(|&rhat| rhat < 1.1)
+            r_hat.iter().all(|&rhat| rhat < R_HAT_CONVERGENCE_THRESHOLD)
         } else {
             false // Cannot assess convergence without multiple chains
         }
     }
 
-    /// Get parameters with low effective sample size (< 400)
+    /// Return parameter indices whose ESS is below [`LOW_ESS_THRESHOLD`].
+    ///
+    /// The comparison is strict: an ESS exactly equal to the threshold is not
+    /// reported.
     pub fn low_ess_params(&self) -> Vec<usize> {
         self.effective_sample_size
             .iter()
             .enumerate()
-            .filter(|(_, &ess)| ess < 400.0)
+            .filter(|(_, &ess)| ess < LOW_ESS_THRESHOLD)
             .map(|(i, _)| i)
             .collect()
     }
 }
 
+/// Validate shared single-chain sample requirements.
+///
+/// Samples must be non-empty, contain at least one parameter, have consistent
+/// dimensions, and contain only finite values.
 fn validate_samples(samples: &[DVector<f64>]) -> Result<()> {
     if samples.is_empty() {
         return Err(BayesError::invalid_parameter("No samples provided"));
@@ -205,7 +287,11 @@ fn validate_samples(samples: &[DVector<f64>]) -> Result<()> {
     Ok(())
 }
 
-/// Calculate effective sample size using autocorrelation
+/// Calculate effective sample size using truncated autocorrelation.
+///
+/// For chains with fewer than ten samples, returns `n` because the
+/// autocorrelation estimate is not considered meaningful. Constant chains also
+/// return `n` via zero autocorrelation time.
 fn calculate_ess(samples: &[f64]) -> f64 {
     let n = samples.len() as f64;
     if n < 10.0 {
@@ -222,7 +308,9 @@ fn calculate_ess(samples: &[f64]) -> f64 {
     }
 }
 
-/// Calculate Monte Carlo standard error
+/// Calculate Monte Carlo standard error as `sqrt(sample_variance / ESS)`.
+///
+/// Returns `0.0` when the sample variance is zero.
 fn calculate_mcse(samples: &[f64]) -> f64 {
     let variance = calculate_variance(samples);
     if variance == 0.0 {
@@ -234,13 +322,22 @@ fn calculate_mcse(samples: &[f64]) -> f64 {
     (variance / ess).sqrt()
 }
 
-/// Estimate total ESS by summing per-chain ESS values instead of concatenating chains,
-/// which would treat unrelated chain boundaries as adjacent Markov states.
+/// Estimate total ESS by summing per-chain ESS values.
+///
+/// Chains are not concatenated because that would treat unrelated chain
+/// boundaries as adjacent Markov states and distort autocorrelation.
 fn calculate_multi_chain_ess(chains: &[Vec<f64>]) -> f64 {
     chains.iter().map(|chain| calculate_ess(chain)).sum()
 }
 
-/// Calculate R-hat statistic (Gelman-Rubin diagnostic)
+/// Calculate the Gelman-Rubin R-hat diagnostic.
+///
+/// Formula: `sqrt(var+ / W)`, where `W` is the mean within-chain sample
+/// variance, `B` is the between-chain variance multiplied by chain length, and
+/// `var+ = ((n - 1) / n) * W + B / n`. Requires at least two equal-length
+/// chains with at least two samples each. Identical constant chains return
+/// `1.0`; constant chains with different means return an error because `W = 0`
+/// makes R-hat undefined.
 fn calculate_r_hat(chains: &[Vec<f64>]) -> Result<f64> {
     if chains.len() < 2 {
         return Err(BayesError::invalid_parameter(
@@ -307,7 +404,10 @@ fn calculate_r_hat(chains: &[Vec<f64>]) -> Result<f64> {
     Ok(r_hat)
 }
 
-/// Calculate autocorrelation function
+/// Calculate lag autocorrelations up to `min(n / 4, 100)` lags.
+///
+/// Lag zero is included when variance is non-zero. Constant chains return a
+/// single zero autocorrelation so downstream ESS falls back to the chain length.
 fn calculate_autocorrelation(samples: &[f64]) -> Vec<f64> {
     let n = samples.len();
     let mean = calculate_mean(samples);
@@ -338,7 +438,11 @@ fn calculate_autocorrelation(samples: &[f64]) -> Vec<f64> {
     autocorr
 }
 
-/// Calculate integrated autocorrelation time
+/// Calculate the truncated integrated autocorrelation time.
+///
+/// The lag-zero autocorrelation is skipped. Summation stops when the current
+/// correlation is below `0.01` or the lag is greater than `6 * tau`, then the
+/// result is clamped to be non-negative.
 fn calculate_integrated_autocorr_time(autocorr: &[f64]) -> f64 {
     let mut sum = 0.0;
     let mut tau = 0.0;
@@ -360,7 +464,7 @@ fn calculate_integrated_autocorr_time(autocorr: &[f64]) -> f64 {
     tau.max(0.0)
 }
 
-/// Calculate mean of a sample
+/// Calculate the arithmetic mean using an online update.
 fn calculate_mean(samples: &[f64]) -> f64 {
     let mut mean = 0.0;
     for (idx, &sample) in samples.iter().enumerate() {
@@ -369,7 +473,9 @@ fn calculate_mean(samples: &[f64]) -> f64 {
     mean
 }
 
-/// Calculate variance of a sample
+/// Calculate unbiased sample variance with denominator `n - 1`.
+///
+/// Returns `0.0` for fewer than two samples.
 fn calculate_variance(samples: &[f64]) -> f64 {
     if samples.len() < 2 {
         return 0.0;
@@ -380,12 +486,15 @@ fn calculate_variance(samples: &[f64]) -> f64 {
     sum_sq_diff / (samples.len() - 1) as f64
 }
 
-/// Calculate standard deviation of a sample
+/// Calculate sample standard deviation.
 fn calculate_std_dev(samples: &[f64]) -> f64 {
     calculate_variance(samples).sqrt()
 }
 
-/// Calculate quantiles (2.5%, 25%, 50%, 75%, 97.5%)
+/// Calculate empirical quantiles at 2.5%, 25%, 50%, 75%, and 97.5%.
+///
+/// Quantile indices are selected by truncating `n * p` to an integer and
+/// clamping to the final sample index.
 fn calculate_quantiles(samples: &[f64]) -> [f64; 5] {
     let mut sorted = samples.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -408,16 +517,22 @@ fn calculate_quantiles(samples: &[f64]) -> [f64; 5] {
     ]
 }
 
-/// Simple trace plot data for visualization
+/// Simple trace plot data for visualization.
 #[derive(Debug, Clone)]
 pub struct TracePlot {
+    /// Parameter index represented by this trace.
     pub parameter_index: usize,
+    /// Parameter values across iterations.
     pub values: Vec<f64>,
+    /// Zero-based iteration indices corresponding to [`Self::values`].
     pub iterations: Vec<usize>,
 }
 
 impl TracePlot {
-    /// Create trace plot data for a parameter
+    /// Create trace plot data for a parameter.
+    ///
+    /// Returns an error for invalid samples or if `parameter_index` is out of
+    /// bounds for the sample dimension.
     pub fn new(samples: &[DVector<f64>], parameter_index: usize) -> Result<Self> {
         validate_samples(samples)?;
 
@@ -442,6 +557,33 @@ impl TracePlot {
 mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
+
+    #[test]
+    fn test_convergence_threshold_constants_are_public_contract() {
+        assert_abs_diff_eq!(R_HAT_CONVERGENCE_THRESHOLD, 1.1, epsilon = 1e-12);
+        assert_abs_diff_eq!(LOW_ESS_THRESHOLD, 400.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn test_convergence_and_low_ess_follow_public_threshold_contract() {
+        let diagnostics = McmcDiagnostics {
+            effective_sample_size: vec![LOW_ESS_THRESHOLD - 1.0, LOW_ESS_THRESHOLD],
+            r_hat: Some(vec![R_HAT_CONVERGENCE_THRESHOLD - 0.01]),
+            mc_se: vec![0.0, 0.0],
+            mean: vec![0.0, 0.0],
+            std_dev: vec![0.0, 0.0],
+            quantiles: vec![[0.0; 5], [0.0; 5]],
+        };
+
+        assert!(diagnostics.has_converged());
+        assert_eq!(diagnostics.low_ess_params(), vec![0]);
+
+        let at_threshold = McmcDiagnostics {
+            r_hat: Some(vec![R_HAT_CONVERGENCE_THRESHOLD]),
+            ..diagnostics
+        };
+        assert!(!at_threshold.has_converged());
+    }
 
     #[test]
     fn test_basic_statistics() {
