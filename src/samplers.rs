@@ -7,6 +7,99 @@ use rand::rngs::{StdRng, ThreadRng};
 use rand::SeedableRng;
 use rand_distr::{Distribution as RandDistribution, Normal as RandNormal};
 
+/// Default finite-difference step size for gradient checks.
+///
+/// This is close to `f64::EPSILON.cbrt()`, a common central-difference
+/// rule-of-thumb that balances truncation and floating-point roundoff error for
+/// unit-scaled parameters.
+pub const DEFAULT_FINITE_DIFFERENCE_STEP: f64 = 1e-5;
+
+/// Estimate the gradient of a log-density with central finite differences.
+///
+/// This helper is useful when debugging gradients supplied to
+/// [`HamiltonianMonteCarlo`]. It evaluates each coordinate independently using
+/// `(f(x + h e_i) - f(x - h e_i)) / (2h)` and returns an error when the step is
+/// not positive/finite or when a perturbed log-density is non-finite. Use a
+/// step size appropriate to the parameter scale; widely different coordinate
+/// scales may need separate checks after rescaling.
+pub fn finite_difference_gradient<F>(
+    log_density: F,
+    point: &DVector<f64>,
+    step_size: f64,
+) -> Result<DVector<f64>>
+where
+    F: Fn(&DVector<f64>) -> f64,
+{
+    if step_size <= 0.0 || !step_size.is_finite() {
+        return Err(BayesError::invalid_parameter(
+            "Finite difference step size must be positive and finite",
+        ));
+    }
+
+    let mut gradient = DVector::zeros(point.len());
+    for coordinate in 0..point.len() {
+        let mut forward = point.clone();
+        forward[coordinate] += step_size;
+
+        let mut backward = point.clone();
+        backward[coordinate] -= step_size;
+
+        let forward_value = log_density(&forward);
+        let backward_value = log_density(&backward);
+        if !forward_value.is_finite() || !backward_value.is_finite() {
+            return Err(BayesError::numerical_error(format!(
+                "Finite difference evaluation produced a non-finite log density at coordinate {coordinate}",
+            )));
+        }
+
+        gradient[coordinate] = (forward_value - backward_value) / (2.0 * step_size);
+    }
+
+    Ok(gradient)
+}
+
+/// Compare an analytic HMC gradient with a finite-difference estimate.
+///
+/// Returns the maximum absolute coordinate-wise difference between the supplied
+/// analytic gradient and the finite-difference estimate. A small value gives a
+/// quick sanity check that the gradient sign and scale match the log-density,
+/// but callers should scale tolerances to the expected gradient magnitude.
+pub fn gradient_check<F, G>(
+    log_density: F,
+    gradient: G,
+    point: &DVector<f64>,
+    step_size: f64,
+) -> Result<f64>
+where
+    F: Fn(&DVector<f64>) -> f64,
+    G: Fn(&DVector<f64>) -> DVector<f64>,
+{
+    if step_size <= 0.0 || !step_size.is_finite() {
+        return Err(BayesError::invalid_parameter(
+            "Finite difference step size must be positive and finite",
+        ));
+    }
+
+    let analytic = gradient(point);
+    if analytic.len() != point.len() {
+        return Err(BayesError::dimension_mismatch(point.len(), analytic.len()));
+    }
+    if analytic.iter().any(|value| !value.is_finite()) {
+        return Err(BayesError::numerical_error(
+            "Analytic gradient produced a non-finite value",
+        ));
+    }
+
+    let estimated = finite_difference_gradient(log_density, point, step_size)?;
+    let max_error = analytic
+        .iter()
+        .zip(estimated.iter())
+        .map(|(left, right)| (left - right).abs())
+        .fold(0.0, f64::max);
+
+    Ok(max_error)
+}
+
 /// Trait for MCMC samplers
 pub trait Sampler {
     /// Sample from the posterior distribution
@@ -719,6 +812,83 @@ mod tests {
 
         let sampler = GibbsSampler::new(samplers, initial_state);
         assert!(sampler.is_ok());
+    }
+
+    #[test]
+    fn test_finite_difference_gradient_matches_quadratic_gradient() {
+        let log_density = |params: &DVector<f64>| -> f64 {
+            -0.5 * (params[0] * params[0] + 4.0 * params[1] * params[1])
+        };
+        let point = DVector::from_vec(vec![1.5, -0.75]);
+
+        let estimated = finite_difference_gradient(log_density, &point, 1e-6).unwrap();
+
+        assert!((estimated[0] + 1.5).abs() < 1e-8);
+        assert!((estimated[1] - 3.0).abs() < 1e-8);
+    }
+
+    #[test]
+    fn test_gradient_check_reports_small_error_for_matching_gradient() {
+        let log_density = |params: &DVector<f64>| -> f64 {
+            -0.5 * (params[0] * params[0] + 4.0 * params[1] * params[1])
+        };
+        let gradient = |params: &DVector<f64>| -> DVector<f64> {
+            DVector::from_vec(vec![-params[0], -4.0 * params[1]])
+        };
+        let point = DVector::from_vec(vec![1.5, -0.75]);
+
+        let max_error = gradient_check(log_density, gradient, &point, 1e-6).unwrap();
+
+        assert!(max_error < 1e-8);
+    }
+
+    #[test]
+    fn test_gradient_check_reports_large_error_for_wrong_sign() {
+        let log_density = |params: &DVector<f64>| -> f64 { -0.5 * params[0] * params[0] };
+        let wrong_gradient =
+            |params: &DVector<f64>| -> DVector<f64> { DVector::from_vec(vec![params[0]]) };
+        let point = DVector::from_vec(vec![2.0]);
+
+        let max_error = gradient_check(log_density, wrong_gradient, &point, 1e-6).unwrap();
+
+        assert!(max_error > 3.9);
+    }
+
+    #[test]
+    fn test_gradient_check_rejects_invalid_inputs() {
+        let log_density = |params: &DVector<f64>| -> f64 { -0.5 * params[0] * params[0] };
+        let point = DVector::from_vec(vec![1.0]);
+
+        assert!(finite_difference_gradient(log_density, &point, 0.0).is_err());
+
+        let wrong_dimension_gradient =
+            |_params: &DVector<f64>| -> DVector<f64> { DVector::from_vec(vec![1.0, 2.0]) };
+        assert!(gradient_check(log_density, wrong_dimension_gradient, &point, 1e-6).is_err());
+    }
+
+    #[test]
+    fn test_gradient_check_rejects_non_finite_evaluations() {
+        let non_finite_density = |params: &DVector<f64>| -> f64 {
+            if params[0] > 1.0 {
+                f64::NAN
+            } else {
+                -0.5 * params[0] * params[0]
+            }
+        };
+        let point = DVector::from_vec(vec![1.0]);
+
+        let finite_difference_error =
+            finite_difference_gradient(non_finite_density, &point, 1e-6).unwrap_err();
+        assert!(matches!(
+            finite_difference_error,
+            BayesError::NumericalError { .. }
+        ));
+
+        let non_finite_gradient =
+            |_params: &DVector<f64>| -> DVector<f64> { DVector::from_vec(vec![f64::INFINITY]) };
+        let gradient_error =
+            gradient_check(non_finite_density, non_finite_gradient, &point, 1e-6).unwrap_err();
+        assert!(matches!(gradient_error, BayesError::NumericalError { .. }));
     }
 
     #[test]
