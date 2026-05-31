@@ -10,7 +10,8 @@ A comprehensive Rust library for Bayesian inference with MCMC samplers, featurin
 
 - **MCMC Samplers**: Metropolis-Hastings, Gibbs, and Hamiltonian Monte Carlo (HMC)
 - **Statistical Distributions**: Normal, Multivariate Normal, Gamma, Beta, Exponential, Uniform, Student's t
-- **MCMC Diagnostics**: Effective sample size, R-hat statistic, autocorrelation analysis, trace plots
+- **MCMC Diagnostics**: Effective sample size, R-hat statistic, MCSE summaries, autocorrelation analysis, trace plots
+- **Multi-chain workflows**: Run multiple seeded chains with a shared warmup/sample schedule
 - **Best Practices**: Comprehensive error handling, extensive testing, performance benchmarks
 - **Easy to Use**: Clean API with extensive documentation and examples
 
@@ -188,11 +189,26 @@ println!("Parameter std devs: {:?}", diagnostics.std_dev);
 
 // Multiple chain diagnostics (includes R-hat)
 let diagnostics = McmcDiagnostics::from_multiple_chains(&chains)?;
+let summary = diagnostics.summary();
 
 if let Some(r_hat) = &diagnostics.r_hat {
     println!("R-hat values: {:?}", r_hat);
     println!("Converged: {}", diagnostics.has_converged());
 }
+println!("R-hat/ESS/MCSE summary: {:?}", summary.parameters);
+
+// Run multiple pre-configured, independently seeded samplers and summarize in one step.
+// The slice must contain at least two samplers of the same concrete sampler type,
+// and at least two retained samples per chain are required for R-hat.
+use bayes_rs::multi_chain::run_multiple_chains;
+let mut seeded_chains = [
+    build_sampler_with_seed(11)?,
+    build_sampler_with_seed(22)?,
+    build_sampler_with_seed(33)?,
+    build_sampler_with_seed(44)?,
+];
+let output = run_multiple_chains(&mut seeded_chains, 1_000, 10_000)?;
+println!("Converged: {}", output.summary.has_converged);
 
 // Trace plots
 let trace_plot = TracePlot::new(&samples, 0)?; // Parameter 0

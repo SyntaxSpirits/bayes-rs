@@ -254,6 +254,95 @@ impl McmcDiagnostics {
             .map(|(i, _)| i)
             .collect()
     }
+
+    /// Return a compact per-parameter summary of R-hat, ESS, and MCSE.
+    ///
+    /// This is useful for reporting the core convergence diagnostics together
+    /// while retaining the full [`McmcDiagnostics`] value for means, standard
+    /// deviations, and quantiles.
+    ///
+    /// This summary assumes the diagnostics were produced by this crate's
+    /// constructors, which populate ESS, MCSE, and any R-hat values with matching
+    /// per-parameter lengths. Manually constructed inconsistent diagnostics may
+    /// produce an incomplete summary.
+    pub fn summary(&self) -> McmcDiagnosticSummary {
+        McmcDiagnosticSummary::from(self)
+    }
+}
+
+/// Compact diagnostic summary for one model parameter.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ParameterDiagnosticSummary {
+    /// Zero-based parameter index.
+    pub parameter_index: usize,
+    /// R-hat statistic for this parameter, or `None` for single-chain diagnostics.
+    pub r_hat: Option<f64>,
+    /// Effective sample size for this parameter.
+    pub effective_sample_size: f64,
+    /// Monte Carlo standard error for this parameter.
+    pub mc_se: f64,
+}
+
+/// Compact diagnostics summary focused on convergence reporting.
+#[derive(Debug, Clone, PartialEq)]
+pub struct McmcDiagnosticSummary {
+    /// Per-parameter R-hat, ESS, and MCSE values.
+    pub parameters: Vec<ParameterDiagnosticSummary>,
+    /// Whether all available R-hat values satisfy the convergence threshold.
+    pub has_converged: bool,
+    /// Parameter indices whose ESS is below [`LOW_ESS_THRESHOLD`].
+    pub low_ess_params: Vec<usize>,
+}
+
+impl From<&McmcDiagnostics> for McmcDiagnosticSummary {
+    /// Build a compact summary from diagnostics produced by this crate's
+    /// constructors.
+    ///
+    /// The conversion expects ESS, MCSE, and any R-hat vectors to use the same
+    /// per-parameter indexing. Public struct literals can violate that invariant;
+    /// prefer [`McmcDiagnostics::from_single_chain`] or
+    /// [`McmcDiagnostics::from_multiple_chains`] when creating diagnostics for
+    /// summarization.
+    fn from(diagnostics: &McmcDiagnostics) -> Self {
+        debug_assert_eq!(
+            diagnostics.effective_sample_size.len(),
+            diagnostics.mc_se.len(),
+            "diagnostics ESS and MCSE lengths should match"
+        );
+        if let Some(r_hat) = diagnostics.r_hat.as_ref() {
+            debug_assert_eq!(
+                diagnostics.effective_sample_size.len(),
+                r_hat.len(),
+                "diagnostics ESS and R-hat lengths should match"
+            );
+        }
+
+        let parameters = diagnostics
+            .effective_sample_size
+            .iter()
+            .zip(diagnostics.mc_se.iter())
+            .enumerate()
+            .map(|(parameter_index, (&effective_sample_size, &mc_se))| {
+                let r_hat = diagnostics
+                    .r_hat
+                    .as_ref()
+                    .and_then(|values| values.get(parameter_index).copied());
+
+                ParameterDiagnosticSummary {
+                    parameter_index,
+                    r_hat,
+                    effective_sample_size,
+                    mc_se,
+                }
+            })
+            .collect();
+
+        Self {
+            parameters,
+            has_converged: diagnostics.has_converged(),
+            low_ess_params: diagnostics.low_ess_params(),
+        }
+    }
 }
 
 /// Validate shared single-chain sample requirements.
@@ -583,6 +672,48 @@ mod tests {
             ..diagnostics
         };
         assert!(!at_threshold.has_converged());
+    }
+
+    #[test]
+    fn test_summary_groups_r_hat_ess_and_mcse_by_parameter() {
+        let diagnostics = McmcDiagnostics {
+            effective_sample_size: vec![100.0, LOW_ESS_THRESHOLD - 1.0],
+            r_hat: Some(vec![1.01, 1.2]),
+            mc_se: vec![0.1, 0.2],
+            mean: vec![0.0, 1.0],
+            std_dev: vec![1.0, 2.0],
+            quantiles: vec![[0.0; 5], [1.0; 5]],
+        };
+
+        let summary = diagnostics.summary();
+
+        assert_eq!(summary.parameters.len(), 2);
+        assert_eq!(summary.parameters[0].parameter_index, 0);
+        assert_eq!(summary.parameters[0].r_hat, Some(1.01));
+        assert_eq!(summary.parameters[0].effective_sample_size, 100.0);
+        assert_eq!(summary.parameters[0].mc_se, 0.1);
+        assert_eq!(summary.parameters[1].parameter_index, 1);
+        assert_eq!(summary.parameters[1].r_hat, Some(1.2));
+        assert!(!summary.has_converged);
+        assert_eq!(summary.low_ess_params, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_single_chain_summary_omits_r_hat() {
+        let diagnostics = McmcDiagnostics {
+            effective_sample_size: vec![LOW_ESS_THRESHOLD],
+            r_hat: None,
+            mc_se: vec![0.0],
+            mean: vec![0.0],
+            std_dev: vec![0.0],
+            quantiles: vec![[0.0; 5]],
+        };
+
+        let summary = McmcDiagnosticSummary::from(&diagnostics);
+
+        assert_eq!(summary.parameters[0].r_hat, None);
+        assert!(!summary.has_converged);
+        assert!(summary.low_ess_params.is_empty());
     }
 
     #[test]
