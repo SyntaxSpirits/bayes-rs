@@ -47,6 +47,7 @@
 pub mod diagnostics;
 pub mod distributions;
 pub mod error;
+pub mod multi_chain;
 pub mod samplers;
 
 pub use error::{BayesError, Result};
@@ -55,6 +56,7 @@ pub use error::{BayesError, Result};
 pub mod prelude {
     pub use crate::distributions::*;
     pub use crate::error::{BayesError, Result};
+    pub use crate::multi_chain::{run_multiple_chains, MultiChainOutput};
     pub use crate::samplers::*;
     pub use nalgebra::{DMatrix, DVector};
 }
