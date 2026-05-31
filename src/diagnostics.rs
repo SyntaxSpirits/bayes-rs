@@ -53,7 +53,8 @@ pub const LOW_ESS_THRESHOLD: f64 = 400.0;
 /// Diagnostics can be created from one chain with [`Self::from_single_chain`] or
 /// from multiple chains with [`Self::from_multiple_chains`]. Vectors are ordered
 /// by parameter index.
-#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[derive(Debug, Clone, PartialEq)]
 pub struct McmcDiagnostics {
     /// Effective sample size for each parameter.
     ///
@@ -271,6 +272,7 @@ impl McmcDiagnostics {
 }
 
 /// Compact diagnostic summary for one model parameter.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ParameterDiagnosticSummary {
     /// Zero-based parameter index.
@@ -284,6 +286,7 @@ pub struct ParameterDiagnosticSummary {
 }
 
 /// Compact diagnostics summary focused on convergence reporting.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct McmcDiagnosticSummary {
     /// Per-parameter R-hat, ESS, and MCSE values.
@@ -607,7 +610,8 @@ fn calculate_quantiles(samples: &[f64]) -> [f64; 5] {
 }
 
 /// Simple trace plot data for visualization.
-#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TracePlot {
     /// Parameter index represented by this trace.
     pub parameter_index: usize,
@@ -902,5 +906,61 @@ mod tests {
         let trace_plot = TracePlot::new(&samples, 0).unwrap();
         assert_eq!(trace_plot.values, vec![1.0, 1.1, 0.9]);
         assert_eq!(trace_plot.iterations, vec![0, 1, 2]);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_diagnostics_summary_serializes_to_json() {
+        let diagnostics = McmcDiagnostics {
+            effective_sample_size: vec![100.0, LOW_ESS_THRESHOLD - 1.0],
+            r_hat: Some(vec![1.01, 1.2]),
+            mc_se: vec![0.1, 0.2],
+            mean: vec![0.0, 1.0],
+            std_dev: vec![1.0, 2.0],
+            quantiles: vec![[0.0; 5], [1.0; 5]],
+        };
+        let summary = diagnostics.summary();
+
+        let json = serde_json::to_value(&summary).unwrap();
+
+        assert_eq!(json["has_converged"], false);
+        assert_eq!(json["parameters"].as_array().unwrap().len(), 2);
+        assert_eq!(json["parameters"][0]["effective_sample_size"], 100.0);
+        assert_eq!(json["parameters"][1]["r_hat"], 1.2);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_diagnostics_and_trace_plot_serialize_to_json() {
+        let samples = vec![
+            DVector::from_vec(vec![1.0, 2.0]),
+            DVector::from_vec(vec![1.1, 2.1]),
+            DVector::from_vec(vec![0.9, 1.9]),
+        ];
+        let diagnostics = McmcDiagnostics {
+            effective_sample_size: vec![3.0, 3.0],
+            r_hat: None,
+            mc_se: vec![0.1, 0.2],
+            mean: vec![1.0, 2.0],
+            std_dev: vec![0.2, 0.2],
+            quantiles: vec![[0.8, 0.9, 1.0, 1.1, 1.2], [1.8, 1.9, 2.0, 2.1, 2.2]],
+        };
+        let trace_plot = TracePlot::new(&samples, 1).unwrap();
+
+        let diagnostics_json = serde_json::to_value(&diagnostics).unwrap();
+        let trace_plot_json = serde_json::to_value(&trace_plot).unwrap();
+
+        assert_eq!(
+            diagnostics_json["effective_sample_size"],
+            serde_json::json!([3.0, 3.0])
+        );
+        assert!(diagnostics_json["r_hat"].is_null());
+        assert_eq!(diagnostics_json["quantiles"].as_array().unwrap().len(), 2);
+        assert_eq!(trace_plot_json["parameter_index"], 1);
+        assert_eq!(
+            trace_plot_json["values"],
+            serde_json::json!([2.0, 2.1, 1.9])
+        );
+        assert_eq!(trace_plot_json["iterations"], serde_json::json!([0, 1, 2]));
     }
 }

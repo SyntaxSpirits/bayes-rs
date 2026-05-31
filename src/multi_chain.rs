@@ -53,7 +53,8 @@ use crate::samplers::Sampler;
 use nalgebra::DVector;
 
 /// Raw multi-chain samples plus their diagnostics summary.
-#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MultiChainOutput {
     /// Samples for each chain, preserving sampler order.
     pub chains: Vec<Vec<DVector<f64>>>,
@@ -236,5 +237,21 @@ mod tests {
         assert_eq!(samplers[1].resets, 0);
         assert_eq!(samplers[0].current_state(), &DVector::from_vec(vec![0.0]));
         assert_eq!(samplers[1].current_state(), &DVector::from_vec(vec![10.0]));
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn multi_chain_output_serializes_to_json() {
+        let mut samplers = [
+            DeterministicSampler::new(0.0),
+            DeterministicSampler::new(10.0),
+        ];
+        let output = run_multiple_chains(&mut samplers, 2, 4).unwrap();
+
+        let json = serde_json::to_value(&output).unwrap();
+
+        assert_eq!(json["chains"].as_array().unwrap().len(), 2);
+        assert_eq!(json["summary"]["parameters"].as_array().unwrap().len(), 1);
+        assert_eq!(json["diagnostics"]["mean"].as_array().unwrap().len(), 1);
     }
 }
