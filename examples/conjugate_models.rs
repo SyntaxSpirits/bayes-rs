@@ -7,7 +7,9 @@
 //! conjugate pairs also provide in closed form. They are deterministic and quick
 //! enough to use as executable docs.
 
-use bayes_rs::distributions::{Beta, Binomial, DiscreteDistribution, Distribution, Gamma, Poisson};
+use bayes_rs::distributions::{
+    Beta, Binomial, DiscreteDistribution, Distribution, Gamma, Normal, Poisson,
+};
 
 fn beta_binomial_posterior(
     prior_alpha: f64,
@@ -33,6 +35,45 @@ fn gamma_poisson_posterior(
         prior_shape + observed_events as f64,
         prior_rate + counts.len() as f64,
     )
+}
+
+pub(crate) fn normal_normal_posterior(
+    prior_mean: f64,
+    prior_std_dev: f64,
+    observation_std_dev: f64,
+    observations: &[f64],
+) -> bayes_rs::Result<Normal> {
+    if observations.is_empty() {
+        return Err(bayes_rs::BayesError::invalid_parameter(
+            "observations cannot be empty",
+        ));
+    }
+    if prior_std_dev <= 0.0 || observation_std_dev <= 0.0 {
+        return Err(bayes_rs::BayesError::invalid_parameter(
+            "standard deviations must be positive",
+        ));
+    }
+    if !prior_mean.is_finite()
+        || !prior_std_dev.is_finite()
+        || !observation_std_dev.is_finite()
+        || observations
+            .iter()
+            .any(|observation| !observation.is_finite())
+    {
+        return Err(bayes_rs::BayesError::invalid_parameter(
+            "normal-normal inputs must be finite",
+        ));
+    }
+
+    let prior_precision = 1.0 / prior_std_dev.powi(2);
+    let observation_precision = 1.0 / observation_std_dev.powi(2);
+    let posterior_precision = prior_precision + observations.len() as f64 * observation_precision;
+    let observation_sum: f64 = observations.iter().sum();
+    let posterior_mean = (prior_mean * prior_precision + observation_sum * observation_precision)
+        / posterior_precision;
+    let posterior_std_dev = (1.0 / posterior_precision).sqrt();
+
+    Normal::new(posterior_mean, posterior_std_dev)
 }
 
 fn main() -> bayes_rs::Result<()> {
@@ -65,6 +106,20 @@ fn main() -> bayes_rs::Result<()> {
     println!(
         "  Posterior density at rate 3.0: {:.3}",
         defect_rate_posterior.pdf(3.0)
+    );
+
+    let measurements = [9.8, 10.3, 10.1, 9.9, 10.2];
+    let mean_posterior = normal_normal_posterior(10.0, 2.0, 0.5, &measurements)?;
+
+    println!("Normal-normal mean update with known observation variance");
+    println!("  Posterior mean: {:.3}", mean_posterior.mean());
+    println!(
+        "  Posterior standard deviation: {:.3}",
+        mean_posterior.std_dev()
+    );
+    println!(
+        "  Posterior density at x = 10.0: {:.3}",
+        mean_posterior.pdf(10.0)
     );
 
     Ok(())
