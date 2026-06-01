@@ -24,6 +24,13 @@ Add this to your `Cargo.toml`:
 bayes-rs = "0.1.0"
 ```
 
+Enable the optional `serde` feature when you want to serialize user-facing MCMC output:
+
+```toml
+[dependencies]
+bayes-rs = { version = "0.1.0", features = ["serde"] }
+```
+
 ### Simple Example
 
 ```rust
@@ -214,6 +221,20 @@ println!("Converged: {}", output.summary.has_converged);
 let trace_plot = TracePlot::new(&samples, 0)?; // Parameter 0
 // Use trace_plot.values and trace_plot.iterations for visualization
 ```
+
+With the optional `serde` feature enabled, `McmcDiagnostics`, `McmcDiagnosticSummary`,
+`ParameterDiagnosticSummary`, `TracePlot`, and `MultiChainOutput` derive `Serialize` for
+JSON or other serde formats:
+
+```rust
+let summary_json = serde_json::to_string_pretty(&output.summary)?;
+```
+
+Add `serde_json` or another serde format crate to your application to emit a concrete format.
+These structs use Rust field names in their serialized form. Treat that JSON shape as a
+convenient interchange format for the current API, not as a long-term storage schema.
+JSON serializers may reject non-finite diagnostics such as `NaN` or `Infinity` from
+degenerate chains; handle those cases before persisting JSON output.
 
 ## Real-World Example: Bayesian Linear Regression
 
