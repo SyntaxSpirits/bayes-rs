@@ -148,6 +148,33 @@ pub struct WarmupRun {
     pub metadata: WarmupMetadata,
 }
 
+fn validate_initial_state(initial_state: &DVector<f64>) -> Result<()> {
+    if initial_state.is_empty() {
+        return Err(BayesError::invalid_parameter(
+            "Initial state must have at least one dimension",
+        ));
+    }
+
+    if initial_state.iter().any(|value| !value.is_finite()) {
+        return Err(BayesError::invalid_parameter(
+            "Initial state must contain only finite values",
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_positive_finite_vector(values: &DVector<f64>, message: &'static str) -> Result<()> {
+    if values
+        .iter()
+        .any(|&value| value <= 0.0 || !value.is_finite())
+    {
+        return Err(BayesError::invalid_parameter(message));
+    }
+
+    Ok(())
+}
+
 /// Trait for MCMC samplers
 pub trait Sampler {
     /// Sample from the posterior distribution
@@ -264,6 +291,8 @@ where
         proposal_std: DVector<f64>,
         rng: R,
     ) -> Result<Self> {
+        validate_initial_state(&initial_state)?;
+
         if initial_state.len() != proposal_std.len() {
             return Err(BayesError::dimension_mismatch(
                 initial_state.len(),
@@ -271,11 +300,10 @@ where
             ));
         }
 
-        if proposal_std.iter().any(|&std| std <= 0.0) {
-            return Err(BayesError::invalid_parameter(
-                "All proposal standard deviations must be positive",
-            ));
-        }
+        validate_positive_finite_vector(
+            &proposal_std,
+            "All proposal standard deviations must be positive and finite",
+        )?;
 
         let current_log_posterior = log_posterior(&initial_state);
         if !current_log_posterior.is_finite() {
@@ -304,11 +332,10 @@ where
             ));
         }
 
-        if proposal_std.iter().any(|&std| std <= 0.0) {
-            return Err(BayesError::invalid_parameter(
-                "All proposal standard deviations must be positive",
-            ));
-        }
+        validate_positive_finite_vector(
+            &proposal_std,
+            "All proposal standard deviations must be positive and finite",
+        )?;
 
         self.proposal_std = proposal_std;
         Ok(())
@@ -436,6 +463,8 @@ where
         initial_state: DVector<f64>,
         rng: R,
     ) -> Result<Self> {
+        validate_initial_state(&initial_state)?;
+
         if conditional_samplers.len() != initial_state.len() {
             return Err(BayesError::dimension_mismatch(
                 conditional_samplers.len(),
@@ -558,8 +587,12 @@ where
         n_leapfrog: usize,
         rng: R,
     ) -> Result<Self> {
-        if step_size <= 0.0 {
-            return Err(BayesError::invalid_parameter("Step size must be positive"));
+        validate_initial_state(&initial_state)?;
+
+        if step_size <= 0.0 || !step_size.is_finite() {
+            return Err(BayesError::invalid_parameter(
+                "Step size must be positive and finite",
+            ));
         }
 
         if n_leapfrog == 0 {
@@ -601,11 +634,10 @@ where
             ));
         }
 
-        if mass_matrix.iter().any(|&m| m <= 0.0) {
-            return Err(BayesError::invalid_parameter(
-                "All mass matrix elements must be positive",
-            ));
-        }
+        validate_positive_finite_vector(
+            &mass_matrix,
+            "All mass matrix elements must be positive and finite",
+        )?;
 
         self.mass_matrix = mass_matrix;
         Ok(())
@@ -1239,16 +1271,140 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_parameters() {
-        let log_posterior = |params: &DVector<f64>| -> f64 {
-            let normal = Normal::new(0.0, 1.0).unwrap();
-            normal.log_pdf(params[0])
-        };
-
+    fn test_metropolis_hastings_rejects_non_positive_and_non_finite_proposal_std() {
+        let log_posterior = |params: &DVector<f64>| -> f64 { -0.5 * params[0] * params[0] };
         let initial_state = DVector::from_vec(vec![0.0]);
-        let bad_proposal_std = DVector::from_vec(vec![0.0]); // Invalid: zero std
 
-        let sampler = MetropolisHastings::new(log_posterior, initial_state, bad_proposal_std);
-        assert!(sampler.is_err());
+        for invalid_std in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let error = MetropolisHastings::new(
+                log_posterior,
+                initial_state.clone(),
+                DVector::from_vec(vec![invalid_std]),
+            )
+            .err()
+            .expect("invalid proposal standard deviation should be rejected");
+            assert!(error.to_string().contains("positive and finite"));
+        }
+    }
+
+    #[test]
+    fn test_metropolis_hastings_set_proposal_std_rejects_non_finite_values() {
+        let log_posterior = |params: &DVector<f64>| -> f64 { -0.5 * params[0] * params[0] };
+        let mut sampler = MetropolisHastings::new(
+            log_posterior,
+            DVector::from_vec(vec![0.0]),
+            DVector::from_vec(vec![1.0]),
+        )
+        .unwrap();
+
+        for invalid_std in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let error = match sampler.set_proposal_std(DVector::from_vec(vec![invalid_std])) {
+                Ok(()) => panic!("invalid proposal standard deviation should be rejected"),
+                Err(error) => error,
+            };
+            assert!(error.to_string().contains("positive and finite"));
+        }
+    }
+
+    #[test]
+    fn test_hmc_rejects_non_positive_and_non_finite_step_size() {
+        let log_posterior = |params: &DVector<f64>| -> f64 { -0.5 * params[0] * params[0] };
+        let gradient =
+            |params: &DVector<f64>| -> DVector<f64> { DVector::from_vec(vec![-params[0]]) };
+        let initial_state = DVector::from_vec(vec![0.0]);
+
+        for invalid_step_size in [0.0, -0.1, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let error = HamiltonianMonteCarlo::new(
+                log_posterior,
+                gradient,
+                initial_state.clone(),
+                invalid_step_size,
+                10,
+            )
+            .err()
+            .expect("invalid HMC step size should be rejected");
+            assert!(error.to_string().contains("positive and finite"));
+        }
+    }
+
+    #[test]
+    fn test_hmc_set_mass_matrix_rejects_non_positive_and_non_finite_values() {
+        let log_posterior = |params: &DVector<f64>| -> f64 { -0.5 * params[0] * params[0] };
+        let gradient =
+            |params: &DVector<f64>| -> DVector<f64> { DVector::from_vec(vec![-params[0]]) };
+        let mut sampler = HamiltonianMonteCarlo::new(
+            log_posterior,
+            gradient,
+            DVector::from_vec(vec![0.0]),
+            0.1,
+            10,
+        )
+        .unwrap();
+
+        for invalid_mass in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let error = match sampler.set_mass_matrix(DVector::from_vec(vec![invalid_mass])) {
+                Ok(()) => panic!("invalid mass matrix should be rejected"),
+                Err(error) => error,
+            };
+            assert!(error.to_string().contains("positive and finite"));
+        }
+    }
+
+    #[test]
+    fn test_samplers_reject_zero_dimensional_initial_states() {
+        let log_posterior = |_params: &DVector<f64>| -> f64 { 0.0 };
+        let gradient = |_params: &DVector<f64>| -> DVector<f64> { DVector::zeros(0) };
+        let empty_state = DVector::zeros(0);
+
+        let mh_error =
+            MetropolisHastings::new(log_posterior, empty_state.clone(), DVector::zeros(0))
+                .err()
+                .expect("zero-dimensional MH initial state should be rejected");
+        assert!(mh_error.to_string().contains("at least one dimension"));
+
+        let hmc_error =
+            HamiltonianMonteCarlo::new(log_posterior, gradient, empty_state.clone(), 0.1, 10)
+                .err()
+                .expect("zero-dimensional HMC initial state should be rejected");
+        assert!(hmc_error.to_string().contains("at least one dimension"));
+
+        let samplers: Vec<_> = Vec::<fn(&DVector<f64>, usize, &mut ThreadRng) -> f64>::new();
+        let gibbs_error = GibbsSampler::new(samplers, empty_state)
+            .err()
+            .expect("zero-dimensional Gibbs initial state should be rejected");
+        assert!(gibbs_error.to_string().contains("at least one dimension"));
+    }
+
+    #[test]
+    fn test_samplers_reject_non_finite_initial_states() {
+        let log_posterior = |params: &DVector<f64>| -> f64 { -0.5 * params[0] * params[0] };
+        let gradient =
+            |params: &DVector<f64>| -> DVector<f64> { DVector::from_vec(vec![-params[0]]) };
+
+        for invalid_value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let initial_state = DVector::from_vec(vec![invalid_value]);
+
+            let mh_error = MetropolisHastings::new(
+                log_posterior,
+                initial_state.clone(),
+                DVector::from_vec(vec![1.0]),
+            )
+            .err()
+            .expect("non-finite MH initial state should be rejected");
+            assert!(mh_error.to_string().contains("finite values"));
+
+            let hmc_error =
+                HamiltonianMonteCarlo::new(log_posterior, gradient, initial_state.clone(), 0.1, 10)
+                    .err()
+                    .expect("non-finite HMC initial state should be rejected");
+            assert!(hmc_error.to_string().contains("finite values"));
+
+            let conditional_sampler =
+                |_params: &DVector<f64>, _idx: usize, _rng: &mut ThreadRng| -> f64 { 0.0 };
+            let gibbs_error = GibbsSampler::new(vec![conditional_sampler], initial_state)
+                .err()
+                .expect("non-finite Gibbs initial state should be rejected");
+            assert!(gibbs_error.to_string().contains("finite values"));
+        }
     }
 }
