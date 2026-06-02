@@ -100,20 +100,89 @@ where
     Ok(max_error)
 }
 
+/// Metadata describing a warmup/burn-in sampling run.
+///
+/// The counts describe the complete sampler schedule: discarded warmup draws,
+/// retained posterior draws, and their sum as total sampler transitions.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WarmupMetadata {
+    /// Number of warmup/burn-in transitions that were run before collection.
+    pub warmup_count: usize,
+    /// Number of posterior samples retained after warmup.
+    pub retained_count: usize,
+    /// Total sampler transitions run (`warmup_count + retained_count`).
+    pub total_iterations: usize,
+}
+
+impl WarmupMetadata {
+    /// Create metadata for a warmup/burn-in sampling schedule.
+    pub fn new(warmup_count: usize, retained_count: usize) -> Self {
+        let total_iterations = warmup_count
+            .checked_add(retained_count)
+            .expect("warmup and retained sample counts exceed usize::MAX");
+
+        Self {
+            warmup_count,
+            retained_count,
+            total_iterations,
+        }
+    }
+}
+
+/// Samples produced by a first-class warmup/burn-in workflow.
+///
+/// `warmup_samples` are the discarded burn-in states and should not be used for
+/// posterior summaries. `samples` are the retained posterior draws. Sampler-level
+/// running statistics are reset between these phases by [`Sampler::run_with_warmup`]
+/// so acceptance statistics reported afterward describe only `samples` when the
+/// concrete sampler overrides [`Sampler::reset_statistics`].
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct WarmupRun {
+    /// Discarded warmup/burn-in samples, preserving iteration order.
+    pub warmup_samples: Vec<DVector<f64>>,
+    /// Retained posterior samples collected after warmup.
+    pub samples: Vec<DVector<f64>>,
+    /// Counts for the run schedule.
+    pub metadata: WarmupMetadata,
+}
+
 /// Trait for MCMC samplers
 pub trait Sampler {
     /// Sample from the posterior distribution
     fn sample(&mut self, n_samples: usize) -> Vec<DVector<f64>>;
 
-    /// Run warmup iterations, discard those states, then collect posterior samples.
+    /// Run warmup iterations, keep them separated as discarded states, reset
+    /// sampler statistics, then collect retained posterior samples.
     ///
     /// Warmup iterations let a Markov chain move away from its initial state before
     /// collecting draws for posterior summaries. This method does not perform
     /// automatic adaptation; callers should tune sampler parameters separately when
     /// their workflow requires it. Statistics such as acceptance rate are reset
-    /// after warmup, so they describe only the returned samples. Implementations
-    /// that maintain running statistics must override [`Sampler::reset_statistics`]
-    /// for this guarantee to hold.
+    /// before retained sampling, even when `n_warmup` is zero, so they describe
+    /// only the retained samples. Implementations that maintain running statistics
+    /// must override [`Sampler::reset_statistics`] for this guarantee to hold.
+    fn run_with_warmup(&mut self, n_warmup: usize, n_samples: usize) -> WarmupRun {
+        let mut warmup_samples = Vec::with_capacity(n_warmup);
+        for _ in 0..n_warmup {
+            warmup_samples.push(self.step());
+        }
+        self.reset_statistics();
+
+        let samples = self.sample(n_samples);
+        WarmupRun {
+            warmup_samples,
+            samples,
+            metadata: WarmupMetadata::new(n_warmup, n_samples),
+        }
+    }
+
+    /// Run warmup iterations, discard those states, then collect posterior samples.
+    ///
+    /// This preserves the lightweight behavior of discarding warmup draws without
+    /// allocating storage for them. Use [`Sampler::run_with_warmup`] when the
+    /// discarded states and schedule metadata are needed.
     fn sample_with_warmup(&mut self, n_warmup: usize, n_samples: usize) -> Vec<DVector<f64>> {
         for _ in 0..n_warmup {
             self.step();
@@ -659,6 +728,128 @@ mod tests {
     use super::*;
     use crate::distributions::{Distribution, Normal};
 
+    #[derive(Debug, Clone)]
+    struct CountingSampler {
+        state: DVector<f64>,
+        steps: usize,
+        resets: usize,
+    }
+
+    impl CountingSampler {
+        fn new() -> Self {
+            Self {
+                state: DVector::from_vec(vec![0.0]),
+                steps: 0,
+                resets: 0,
+            }
+        }
+    }
+
+    impl Sampler for CountingSampler {
+        fn sample(&mut self, n_samples: usize) -> Vec<DVector<f64>> {
+            (0..n_samples).map(|_| self.step()).collect()
+        }
+
+        fn step(&mut self) -> DVector<f64> {
+            self.steps += 1;
+            self.state[0] += 1.0;
+            self.state.clone()
+        }
+
+        fn current_state(&self) -> &DVector<f64> {
+            &self.state
+        }
+
+        fn reset_statistics(&mut self) {
+            self.resets += 1;
+        }
+    }
+
+    #[test]
+    fn test_run_with_warmup_separates_discarded_and_retained_samples() {
+        let mut sampler = CountingSampler::new();
+
+        let run = sampler.run_with_warmup(2, 3);
+
+        assert_eq!(
+            run.warmup_samples,
+            vec![DVector::from_vec(vec![1.0]), DVector::from_vec(vec![2.0])]
+        );
+        assert_eq!(
+            run.samples,
+            vec![
+                DVector::from_vec(vec![3.0]),
+                DVector::from_vec(vec![4.0]),
+                DVector::from_vec(vec![5.0]),
+            ]
+        );
+        assert_eq!(
+            run.metadata,
+            WarmupMetadata {
+                warmup_count: 2,
+                retained_count: 3,
+                total_iterations: 5,
+            }
+        );
+        assert_eq!(sampler.steps, 5);
+        assert_eq!(sampler.resets, 1);
+        assert_eq!(sampler.current_state(), &DVector::from_vec(vec![5.0]));
+    }
+
+    #[test]
+    fn test_run_with_zero_warmup_retains_regular_samples_with_metadata() {
+        let mut sampler = CountingSampler::new();
+
+        let run = sampler.run_with_warmup(0, 3);
+
+        assert!(run.warmup_samples.is_empty());
+        assert_eq!(
+            run.samples,
+            vec![
+                DVector::from_vec(vec![1.0]),
+                DVector::from_vec(vec![2.0]),
+                DVector::from_vec(vec![3.0]),
+            ]
+        );
+        assert_eq!(run.metadata, WarmupMetadata::new(0, 3));
+        assert_eq!(sampler.steps, 3);
+        assert_eq!(sampler.resets, 1);
+    }
+
+    #[test]
+    fn test_run_with_warmup_allows_zero_retained_samples() {
+        let mut sampler = CountingSampler::new();
+
+        let run = sampler.run_with_warmup(3, 0);
+
+        assert_eq!(
+            run.warmup_samples,
+            vec![
+                DVector::from_vec(vec![1.0]),
+                DVector::from_vec(vec![2.0]),
+                DVector::from_vec(vec![3.0]),
+            ]
+        );
+        assert!(run.samples.is_empty());
+        assert_eq!(run.metadata, WarmupMetadata::new(3, 0));
+        assert_eq!(sampler.steps, 3);
+        assert_eq!(sampler.resets, 1);
+    }
+
+    #[test]
+    fn test_sample_with_warmup_returns_retained_samples_only() {
+        let mut sampler = CountingSampler::new();
+
+        let samples = sampler.sample_with_warmup(3, 2);
+
+        assert_eq!(
+            samples,
+            vec![DVector::from_vec(vec![4.0]), DVector::from_vec(vec![5.0])]
+        );
+        assert_eq!(sampler.steps, 5);
+        assert_eq!(sampler.resets, 1);
+    }
+
     #[test]
     fn test_metropolis_hastings_creation() {
         let log_posterior = |params: &DVector<f64>| -> f64 {
@@ -797,6 +988,40 @@ mod tests {
         assert_eq!(
             warmup_sampler.sample_with_warmup(0, 50),
             regular_sampler.sample(50)
+        );
+    }
+
+    #[test]
+    fn test_run_with_warmup_resets_metropolis_hastings_statistics_before_retained_samples() {
+        let log_posterior = |params: &DVector<f64>| -> f64 {
+            let normal = Normal::new(0.0, 1.0).unwrap();
+            normal.log_pdf(params[0])
+        };
+
+        let initial_state = DVector::from_vec(vec![0.0]);
+        let proposal_std = DVector::from_vec(vec![0.5]);
+
+        let mut warmup_sampler = MetropolisHastings::with_seed(
+            log_posterior,
+            initial_state.clone(),
+            proposal_std.clone(),
+            789,
+        )
+        .unwrap();
+        let run = warmup_sampler.run_with_warmup(25, 50);
+
+        let mut manual_sampler =
+            MetropolisHastings::with_seed(log_posterior, initial_state, proposal_std, 789).unwrap();
+        let warmup_samples = manual_sampler.sample(25);
+        manual_sampler.reset_statistics();
+        let retained_samples = manual_sampler.sample(50);
+
+        assert_eq!(run.warmup_samples, warmup_samples);
+        assert_eq!(run.samples, retained_samples);
+        assert_eq!(run.metadata, WarmupMetadata::new(25, 50));
+        assert_eq!(
+            warmup_sampler.acceptance_rate(),
+            manual_sampler.acceptance_rate()
         );
     }
 
