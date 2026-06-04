@@ -19,9 +19,10 @@ pub const DEFAULT_FINITE_DIFFERENCE_STEP: f64 = 1e-5;
 /// This helper is useful when debugging gradients supplied to
 /// [`HamiltonianMonteCarlo`]. It evaluates each coordinate independently using
 /// `(f(x + h e_i) - f(x - h e_i)) / (2h)` and returns an error when the step is
-/// not positive/finite or when a perturbed log-density is non-finite. Use a
-/// step size appropriate to the parameter scale; widely different coordinate
-/// scales may need separate checks after rescaling.
+/// not positive/finite, when the point is empty or non-finite, or when a
+/// perturbed log-density is non-finite. Use a step size appropriate to the
+/// parameter scale; widely different coordinate scales may need separate checks
+/// after rescaling.
 pub fn finite_difference_gradient<F>(
     log_density: F,
     point: &DVector<f64>,
@@ -30,6 +31,8 @@ pub fn finite_difference_gradient<F>(
 where
     F: Fn(&DVector<f64>) -> f64,
 {
+    validate_gradient_point(point)?;
+
     if step_size <= 0.0 || !step_size.is_finite() {
         return Err(BayesError::invalid_parameter(
             "Finite difference step size must be positive and finite",
@@ -63,7 +66,9 @@ where
 /// Returns the maximum absolute coordinate-wise difference between the supplied
 /// analytic gradient and the finite-difference estimate. A small value gives a
 /// quick sanity check that the gradient sign and scale match the log-density,
-/// but callers should scale tolerances to the expected gradient magnitude.
+/// but callers should scale tolerances to the expected gradient magnitude. The
+/// check returns an error for empty or non-finite points before evaluating the
+/// analytic gradient.
 pub fn gradient_check<F, G>(
     log_density: F,
     gradient: G,
@@ -74,6 +79,8 @@ where
     F: Fn(&DVector<f64>) -> f64,
     G: Fn(&DVector<f64>) -> DVector<f64>,
 {
+    validate_gradient_point(point)?;
+
     if step_size <= 0.0 || !step_size.is_finite() {
         return Err(BayesError::invalid_parameter(
             "Finite difference step size must be positive and finite",
@@ -158,6 +165,22 @@ fn validate_initial_state(initial_state: &DVector<f64>) -> Result<()> {
     if initial_state.iter().any(|value| !value.is_finite()) {
         return Err(BayesError::invalid_parameter(
             "Initial state must contain only finite values",
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_gradient_point(point: &DVector<f64>) -> Result<()> {
+    if point.is_empty() {
+        return Err(BayesError::invalid_parameter(
+            "Gradient check point must have at least one dimension",
+        ));
+    }
+
+    if point.iter().any(|value| !value.is_finite()) {
+        return Err(BayesError::invalid_parameter(
+            "Gradient check point must contain only finite values",
         ));
     }
 
@@ -1117,6 +1140,36 @@ mod tests {
         let point = DVector::from_vec(vec![1.0]);
 
         assert!(finite_difference_gradient(log_density, &point, 0.0).is_err());
+
+        let empty_point = DVector::from_vec(vec![]);
+        assert!(finite_difference_gradient(log_density, &empty_point, 1e-6).is_err());
+        assert!(gradient_check(
+            log_density,
+            |_| DVector::from_vec(vec![]),
+            &empty_point,
+            1e-6
+        )
+        .is_err());
+
+        let non_finite_point = DVector::from_vec(vec![f64::NAN]);
+        assert!(finite_difference_gradient(log_density, &non_finite_point, 1e-6).is_err());
+        assert!(gradient_check(
+            log_density,
+            |_| DVector::from_vec(vec![0.0]),
+            &non_finite_point,
+            1e-6
+        )
+        .is_err());
+
+        let infinite_point = DVector::from_vec(vec![f64::INFINITY]);
+        assert!(finite_difference_gradient(log_density, &infinite_point, 1e-6).is_err());
+        assert!(gradient_check(
+            log_density,
+            |_| DVector::from_vec(vec![0.0]),
+            &infinite_point,
+            1e-6
+        )
+        .is_err());
 
         let wrong_dimension_gradient =
             |_params: &DVector<f64>| -> DVector<f64> { DVector::from_vec(vec![1.0, 2.0]) };
