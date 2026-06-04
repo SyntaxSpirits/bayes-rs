@@ -698,8 +698,9 @@ fn gamma_ln(x: f64) -> f64 {
         return f64::NEG_INFINITY;
     }
 
-    // Coefficients for g=7, n=9 from Numerical Recipes.
-    const COEFFS: [f64; 9] = [
+    // Lanczos coefficients for g=7, n=9 from Numerical Recipes.
+    const LANCZOS_G: f64 = 7.0;
+    const LANCZOS_COEFFS: [f64; 9] = [
         0.999_999_999_999_809_9,
         676.520_368_121_885_1,
         -1_259.139_216_722_402_8,
@@ -716,11 +717,11 @@ fn gamma_ln(x: f64) -> f64 {
     }
 
     let z = x - 1.0;
-    let mut a = COEFFS[0];
-    for (i, coeff) in COEFFS.iter().enumerate().skip(1) {
+    let mut a = LANCZOS_COEFFS[0];
+    for (i, coeff) in LANCZOS_COEFFS.iter().enumerate().skip(1) {
         a += coeff / (z + i as f64);
     }
-    let t = z + 7.5;
+    let t = z + LANCZOS_G + 0.5;
 
     0.5 * (2.0 * PI).ln() + (z + 0.5) * t.ln() - t + a.ln()
 }
@@ -853,6 +854,7 @@ mod tests {
         assert_eq!(poisson.variance(), 3.0);
 
         assert_abs_diff_eq!(poisson.pmf(0), (-3.0_f64).exp(), epsilon = 1e-12);
+        assert_abs_diff_eq!(poisson.log_pmf(0), -3.0, epsilon = 1e-12);
         assert_abs_diff_eq!(poisson.pmf(2), 4.5 * (-3.0_f64).exp(), epsilon = 1e-12);
         assert_abs_diff_eq!(
             poisson.log_pmf(2),
@@ -890,6 +892,65 @@ mod tests {
         assert_abs_diff_eq!(gamma_ln(1.0), 0.0, epsilon = 1e-12);
         assert_abs_diff_eq!(gamma_ln(5.0), 24.0_f64.ln(), epsilon = 1e-12);
         assert_abs_diff_eq!(gamma_ln(10.0), 362_880.0_f64.ln(), epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_gamma_ln_regression_absolute_log_probabilities() {
+        // These analytical checks pin absolute normalizing constants used by
+        // distributions that depend on gamma_ln, including non-integer and
+        // larger combinatorial cases. Decimal expectations were computed from
+        // the closed-form definitions with Python's math.lgamma at double
+        // precision so future changes can be independently re-verified.
+        let exponential_gamma = Gamma::new(1.0, 1.0).unwrap();
+        assert_abs_diff_eq!(exponential_gamma.log_pdf(1.0), -1.0, epsilon = 1e-12);
+
+        let non_integer_gamma = Gamma::new(2.5, 1.5).unwrap();
+        assert_abs_diff_eq!(
+            non_integer_gamma.log_pdf(1.2),
+            -0.797_537_765_011_576_5,
+            epsilon = 1e-12
+        );
+
+        let uniform_beta = Beta::new(1.0, 1.0).unwrap();
+        assert_abs_diff_eq!(uniform_beta.log_pdf(0.5), 0.0, epsilon = 1e-12);
+
+        let fractional_beta = Beta::new(2.5, 3.5).unwrap();
+        assert_abs_diff_eq!(
+            fractional_beta.log_pdf(0.4),
+            0.650_335_112_735_843_9,
+            epsilon = 1e-12
+        );
+
+        let cauchy = StudentT::new(1.0, 0.0, 1.0).unwrap();
+        assert_abs_diff_eq!(cauchy.log_pdf(0.0), -PI.ln(), epsilon = 1e-12);
+
+        let scaled_student_t = StudentT::new(5.0, 0.5, 1.25).unwrap();
+        assert_abs_diff_eq!(
+            scaled_student_t.log_pdf(1.75),
+            -1.738_727_810_750_798_4,
+            epsilon = 1e-12
+        );
+
+        let poisson = Poisson::new(3.0).unwrap();
+        assert_abs_diff_eq!(poisson.log_pmf(0), -3.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(
+            poisson.log_pmf(4),
+            -1.783_604_675_675_505_7,
+            epsilon = 1e-12
+        );
+
+        let fair_coin = Binomial::new(4, 0.5).unwrap();
+        assert_abs_diff_eq!(fair_coin.log_pmf(2), (6.0_f64 / 16.0).ln(), epsilon = 1e-12);
+        assert_abs_diff_eq!(
+            log_binomial_coefficient(5, 2),
+            10.0_f64.ln(),
+            epsilon = 1e-12
+        );
+        assert_abs_diff_eq!(
+            log_binomial_coefficient(10, 3),
+            120.0_f64.ln(),
+            epsilon = 1e-12
+        );
     }
 
     #[test]
