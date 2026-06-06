@@ -9,7 +9,7 @@ A comprehensive Rust library for Bayesian inference with MCMC samplers, featurin
 ## Features
 
 - **MCMC Samplers**: Metropolis-Hastings, Gibbs, and Hamiltonian Monte Carlo (HMC)
-- **Statistical Distributions**: Normal, Multivariate Normal, Gamma, Beta, Exponential, Uniform, Student's t, Bernoulli, Binomial, Poisson
+- **Statistical Distributions**: Normal, Multivariate Normal, Gamma, Beta, Exponential, Uniform, Student's t, Bernoulli, Binomial, Poisson, Categorical
 - **MCMC Diagnostics**: Effective sample size, R-hat statistic, MCSE summaries, autocorrelation analysis, trace plots
 - **Multi-chain workflows**: Run multiple seeded chains with a shared warmup/sample schedule
 - **Best Practices**: Comprehensive error handling, extensive testing, performance benchmarks
@@ -182,23 +182,28 @@ println!("Log PDF: {}", mvn.log_pdf(&x));
 
 ### Discrete Distributions
 
-Use `DiscreteDistribution` for count-valued distributions with probability mass functions and seeded sampling. `Poisson::new(lambda)` requires `lambda` to be finite, positive, and no greater than `1e12`. Add `rand = "0.8"` to your application dependencies when using the seeded sampling example.
+Use `DiscreteDistribution` for integer-valued distributions with probability mass functions and seeded sampling. `Poisson::new(lambda)` requires `lambda` to be finite, positive, and no greater than `1e12`. `Categorical::new(weights)` accepts non-empty, finite, non-negative category weights, normalizes them, and samples category indices starting at `0`. Add `rand = "0.8"` to your application dependencies when using the seeded sampling example.
 
 ```rust
-use bayes_rs::distributions::{Bernoulli, Binomial, DiscreteDistribution, Poisson};
+use bayes_rs::distributions::{Bernoulli, Binomial, Categorical, DiscreteDistribution, Poisson};
 use rand::{rngs::StdRng, SeedableRng};
 
 let bernoulli = Bernoulli::new(0.3)?;
 let binomial = Binomial::new(10, 0.3)?;
 let poisson = Poisson::new(2.5)?;
+let categorical = Categorical::new(vec![0.2, 0.3, 0.5])?;
 
 println!("Bernoulli P(X=1): {}", bernoulli.pmf(1));
 println!("Binomial log P(X=3): {}", binomial.log_pmf(3));
 println!("Poisson P(X=2): {}", poisson.pmf(2));
+println!("Categorical P(X=2): {}", categorical.pmf(2));
+println!("Categorical mean index: {}", categorical.mean());
 
 let mut rng = StdRng::seed_from_u64(42);
 let draw = poisson.sample(&mut rng);
 println!("Seeded Poisson draw: {}", draw);
+let category = categorical.sample(&mut rng);
+println!("Seeded categorical draw: {}", category);
 ```
 
 ## MCMC Diagnostics
@@ -378,7 +383,7 @@ See the `examples/` directory for complete examples:
 # Bayesian linear regression example
 cargo run --example linear_regression
 
-# Discrete Bernoulli, Binomial, and Poisson distributions
+# Discrete Bernoulli, Binomial, Poisson, and Categorical distributions
 cargo run --example discrete_distributions
 
 # Conjugate Bayesian model examples

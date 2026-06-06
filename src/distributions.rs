@@ -237,6 +237,124 @@ impl DiscreteDistribution for Poisson {
     }
 }
 
+/// Categorical distribution over category indices `0..K`.
+///
+/// The constructor accepts non-negative, finite weights and stores them as
+/// normalized probabilities. At least one category must have positive mass.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Categorical {
+    probabilities: Vec<f64>,
+    cumulative_probabilities: Vec<f64>,
+}
+
+impl Categorical {
+    /// Create a new categorical distribution from non-negative weights.
+    ///
+    /// The weights must be non-empty, finite, non-negative, and have positive
+    /// finite total mass. They do not need to already sum to one.
+    pub fn new(weights: Vec<f64>) -> Result<Self> {
+        if weights.is_empty() {
+            return Err(BayesError::invalid_parameter(
+                "categorical weights must not be empty",
+            ));
+        }
+
+        if weights.iter().any(|&w| !w.is_finite() || w < 0.0) {
+            return Err(BayesError::invalid_parameter(
+                "categorical weights must be finite and non-negative",
+            ));
+        }
+
+        let total_mass: f64 = weights.iter().sum();
+        if !total_mass.is_finite() || total_mass <= 0.0 {
+            return Err(BayesError::invalid_parameter(
+                "categorical weights must have positive finite total mass",
+            ));
+        }
+
+        let probabilities: Vec<f64> = weights.into_iter().map(|w| w / total_mass).collect();
+        let mut running_total = 0.0;
+        let mut cumulative_probabilities: Vec<f64> = probabilities
+            .iter()
+            .map(|&p| {
+                running_total += p;
+                running_total
+            })
+            .collect();
+
+        // Avoid roundoff leaving the final positive-mass category unreachable
+        // for samples infinitesimally below 1.0. Clamp through trailing zero-mass
+        // categories so they do not accidentally become sampleable.
+        if let Some(last_positive) = probabilities.iter().rposition(|&p| p > 0.0) {
+            for cumulative_probability in &mut cumulative_probabilities[last_positive..] {
+                *cumulative_probability = 1.0;
+            }
+        }
+
+        Ok(Self {
+            probabilities,
+            cumulative_probabilities,
+        })
+    }
+
+    /// Get the normalized category probabilities.
+    pub fn probabilities(&self) -> &[f64] {
+        &self.probabilities
+    }
+
+    /// Get the number of categories.
+    pub fn category_count(&self) -> usize {
+        self.probabilities.len()
+    }
+
+    /// Get the mean category index.
+    pub fn mean(&self) -> f64 {
+        self.probabilities
+            .iter()
+            .enumerate()
+            .map(|(category, &p)| category as f64 * p)
+            .sum()
+    }
+
+    /// Get the variance of the category index.
+    pub fn variance(&self) -> f64 {
+        let mean = self.mean();
+        self.probabilities
+            .iter()
+            .enumerate()
+            .map(|(category, &p)| {
+                let diff = category as f64 - mean;
+                diff * diff * p
+            })
+            .sum()
+    }
+}
+
+impl DiscreteDistribution for Categorical {
+    fn log_pmf(&self, k: u64) -> f64 {
+        let Ok(index) = usize::try_from(k) else {
+            return f64::NEG_INFINITY;
+        };
+        let Some(&probability) = self.probabilities.get(index) else {
+            return f64::NEG_INFINITY;
+        };
+
+        if probability == 0.0 {
+            f64::NEG_INFINITY
+        } else {
+            probability.ln()
+        }
+    }
+
+    fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> u64 {
+        let u: f64 = rng.gen();
+        self.cumulative_probabilities
+            .iter()
+            .position(|&cdf| u < cdf)
+            .unwrap_or(self.probabilities.len() - 1) as u64
+    }
+}
+
 /// Normal (Gaussian) distribution
 #[derive(Debug, Clone, PartialEq)]
 pub struct Normal {
@@ -883,6 +1001,76 @@ mod tests {
 
         assert_eq!(samples_a, samples_b);
         assert!(samples_a.iter().all(|&x| x < 100));
+    }
+
+    #[test]
+    fn test_categorical_distribution() {
+        let categorical = Categorical::new(vec![1.0, 2.0, 3.0]).unwrap();
+        assert_eq!(categorical.category_count(), 3);
+        assert_abs_diff_eq!(categorical.probabilities()[0], 1.0 / 6.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(categorical.probabilities()[1], 2.0 / 6.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(categorical.probabilities()[2], 3.0 / 6.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(categorical.mean(), 4.0 / 3.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(categorical.variance(), 5.0 / 9.0, epsilon = 1e-12);
+
+        assert_abs_diff_eq!(categorical.pmf(0), 1.0 / 6.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(categorical.pmf(1), 2.0 / 6.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(categorical.pmf(2), 3.0 / 6.0, epsilon = 1e-12);
+        assert_eq!(categorical.pmf(3), 0.0);
+        assert_eq!(categorical.log_pmf(3), f64::NEG_INFINITY);
+        assert_abs_diff_eq!(categorical.log_pmf(2), (0.5_f64).ln(), epsilon = 1e-12);
+    }
+
+    #[test]
+    fn test_categorical_zero_probability_categories() {
+        let categorical = Categorical::new(vec![0.0, 5.0, 0.0]).unwrap();
+        assert_eq!(categorical.probabilities(), &[0.0, 1.0, 0.0]);
+        assert_eq!(categorical.pmf(0), 0.0);
+        assert_eq!(categorical.pmf(1), 1.0);
+        assert_eq!(categorical.pmf(2), 0.0);
+        assert_eq!(categorical.log_pmf(0), f64::NEG_INFINITY);
+        assert_eq!(categorical.log_pmf(2), f64::NEG_INFINITY);
+        assert_eq!(categorical.mean(), 1.0);
+        assert_eq!(categorical.variance(), 0.0);
+        assert_eq!(categorical.sample(&mut rand::thread_rng()), 1);
+    }
+
+    #[test]
+    fn test_categorical_trailing_zero_weight_never_samples_zero_mass_category() {
+        let categorical = Categorical::new(vec![1.0, 0.1, 0.0]).unwrap();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(321);
+        let samples: Vec<_> = (0..1_000).map(|_| categorical.sample(&mut rng)).collect();
+
+        assert!(samples.iter().all(|&x| x < 2));
+        assert_eq!(categorical.pmf(2), 0.0);
+        assert_eq!(categorical.log_pmf(2), f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn test_categorical_invalid_params() {
+        assert!(Categorical::new(vec![]).is_err());
+        assert!(Categorical::new(vec![0.0, 0.0]).is_err());
+        assert!(Categorical::new(vec![1.0, -0.1]).is_err());
+        assert!(Categorical::new(vec![1.0, f64::NAN]).is_err());
+        assert!(Categorical::new(vec![1.0, f64::INFINITY]).is_err());
+        assert!(Categorical::new(vec![f64::MAX, f64::MAX]).is_err());
+    }
+
+    #[test]
+    fn test_categorical_sampling_seeded() {
+        let categorical = Categorical::new(vec![0.2, 0.3, 0.5]).unwrap();
+        let mut rng_a = rand::rngs::StdRng::seed_from_u64(123);
+        let mut rng_b = rand::rngs::StdRng::seed_from_u64(123);
+        let samples_a: Vec<_> = (0..16).map(|_| categorical.sample(&mut rng_a)).collect();
+        let samples_b: Vec<_> = (0..16).map(|_| categorical.sample(&mut rng_b)).collect();
+
+        assert_eq!(samples_a, samples_b);
+        assert!(samples_a
+            .iter()
+            .all(|&x| x < categorical.category_count() as u64));
+        assert!(samples_a.contains(&0));
+        assert!(samples_a.contains(&1));
+        assert!(samples_a.contains(&2));
     }
 
     #[test]
