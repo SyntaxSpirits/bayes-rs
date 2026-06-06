@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-06-06
+
+### Added
+- Categorical discrete distribution with normalized category weights,
+  PMF/log-PMF helpers, analytical moments, and seeded sampling support.
+
 ## [0.2.0] - 2026-06-06
 
 ### Added
@@ -35,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Improved numerical accuracy of the Gamma log-probability computation; locked
   with a regression test.
 
+[0.3.0]: https://github.com/SyntaxSpirits/bayes-rs/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/SyntaxSpirits/bayes-rs/releases/tag/v0.2.0
 
 ## [0.1.0] - 2025-07-03
