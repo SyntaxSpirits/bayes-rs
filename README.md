@@ -21,14 +21,14 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-bayes-rs = "0.2.0"
+bayes-rs = "0.3.0"
 ```
 
 Enable the optional `serde` feature when you want to serialize user-facing MCMC output:
 
 ```toml
 [dependencies]
-bayes-rs = { version = "0.2.0", features = ["serde"] }
+bayes-rs = { version = "0.3.0", features = ["serde"] }
 ```
 
 ### Simple Example
