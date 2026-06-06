@@ -45,6 +45,39 @@ cargo doc --all-features --no-deps
 cargo bench
 ```
 
+### Benchmark Baseline Reporting
+
+Benchmarks use Criterion and are intended to inform reviews without making CI
+flaky. Do not add mandatory performance pass/fail gates unless the project later
+adopts a dedicated, stable benchmarking runner.
+
+For performance-sensitive changes, capture a reproducible local baseline before
+editing and compare your branch against it:
+
+```bash
+# From the baseline branch or commit you want to compare against
+cargo bench --all-features -- --save-baseline before-change
+
+# From your feature branch
+cargo bench --all-features -- --baseline before-change
+```
+
+Include the following details in the PR description when benchmark results are
+relevant:
+
+- Baseline and candidate git SHAs (`git rev-parse --short HEAD` for each)
+- `rustc --version` and `cargo --version`
+- CPU model/core count, operating system, and any relevant power or thermal
+  constraints
+- Exact benchmark command, including feature flags and any Criterion filters
+- A short summary of the Criterion comparison, plus the HTML report location
+  (`target/criterion/report/index.html`, or the equivalent path under
+  `$CARGO_TARGET_DIR`) or attached artifacts when helpful
+
+Prefer local Criterion comparisons and posted artifacts over CI performance
+thresholds. CI should continue checking that benchmarks compile, for example with
+`cargo bench --no-run --all-features`, without failing on noisy timing deltas.
+
 ## Contribution Guidelines
 
 ### Code Style
