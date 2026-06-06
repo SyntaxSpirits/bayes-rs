@@ -333,11 +333,37 @@ println!("Slope estimate: {:.3} ± {:.3}",
 
 ## Performance
 
-Run benchmarks to see performance characteristics:
+Run the Criterion benchmarks to see performance characteristics:
 
 ```bash
 cargo bench
 ```
+
+When sharing benchmark results, include enough context for others to reproduce
+and interpret them:
+
+- Git revision, for example `git rev-parse --short HEAD`
+- Rust toolchain versions from `rustc --version` and `cargo --version`
+- CPU, operating system, and any notable power/thermal settings
+- Exact command used, including feature flags or Criterion filters
+- Criterion output location, such as `target/criterion/report/index.html` (or
+  the equivalent path under `$CARGO_TARGET_DIR`), when the HTML report is useful
+  for review
+
+For local regression checks, capture a named Criterion baseline and compare the
+current work against it:
+
+```bash
+# From the baseline branch or commit you want to compare against
+cargo bench --all-features -- --save-baseline before-change
+
+# From your feature branch
+cargo bench --all-features -- --baseline before-change
+```
+
+Treat benchmark numbers as local evidence rather than CI pass/fail gates. Runtime
+noise varies by machine, so prefer posting the captured context and Criterion
+comparison in reviews over adding flaky performance thresholds to automation.
 
 The library is optimized for:
 - Efficient matrix operations using `nalgebra`
